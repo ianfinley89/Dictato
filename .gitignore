@@ -1,0 +1,53 @@
+# ── Secrets & environment ──
+.env
+.env.*
+!.env.example
+
+# ── User data, uploads, database ──
+data/
+uploads/
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+
+# ── Manual test assets (large / licensed) ──
+tests/fixtures/
+
+# ── Python ──
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+env/
+*.egg-info/
+build/
+dist/
+.coverage
+htmlcov/
+
+# ── Internal project docs (keep private) ──
+BUILD_PLAN.md
+CLAUDE.md
+
+# ── Editor / IDE / agent config (machine-specific) ──
+.claude/
+.vscode/
+.idea/
+*.swp
+*~
+
+# ── OS junk ──
+.DS_Store
+Thumbs.db
+ehthumbs.db
+desktop.ini
+
+# ── Logs & temp ──
+*.log

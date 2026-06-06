@@ -1,0 +1,28 @@
+[project]
+name = "dictato"
+version = "0.1.0"
+description = "Fast voice/photo/manual calorie and macro tracker"
+requires-python = ">=3.14"
+dependencies = [
+    "anthropic>=0.105.2",
+    "argon2-cffi>=25.1.0",
+    "fastapi>=0.136.3",
+    "httpx>=0.28.1",
+    "itsdangerous>=2.2.0",
+    "pydantic[email]>=2.13.4",
+    "python-dotenv>=1.2.2",
+    "python-multipart>=0.0.30",
+    "pywebpush>=2.3.0",
+    "uvicorn[standard]>=0.48.0",
+]
+
+[dependency-groups]
+dev = [
+    "httpx>=0.28.1",
+    "httpx2>=2.3.0",
+    "pytest>=9.0.3",
+    "pytest-asyncio>=1.4.0",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"

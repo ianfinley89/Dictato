@@ -1,0 +1,332 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Dictato</title>
+  <link rel="manifest" href="/manifest.json">
+  <link rel="stylesheet" href="/static/style.css">
+  <meta name="theme-color" content="#1a1a2e">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Dictato">
+</head>
+<body>
+
+<!-- ═══════════════════ AUTH SCREEN ═══════════════════ -->
+<div id="auth-screen" class="screen">
+  <div class="auth-card">
+    <h1>Dictato</h1>
+    <p class="tagline">Track what you eat — fast.</p>
+
+    <div class="auth-tabs">
+      <button class="tab active" data-tab="login">Log In</button>
+      <button class="tab" data-tab="register">Sign Up</button>
+    </div>
+
+    <form id="login-form" class="auth-form">
+      <input type="email" id="login-email" placeholder="Email" required autocomplete="email">
+      <input type="password" id="login-password" placeholder="Password" required autocomplete="current-password">
+      <button type="submit" class="btn-primary">Log In</button>
+      <p id="login-error" class="error hidden"></p>
+    </form>
+
+    <form id="register-form" class="auth-form hidden">
+      <input type="text" id="reg-name" placeholder="Display name" required>
+      <input type="email" id="reg-email" placeholder="Email" required autocomplete="email">
+      <input type="password" id="reg-password" placeholder="Password (8+ chars)" required autocomplete="new-password">
+      <button type="submit" class="btn-primary">Create Account</button>
+      <p id="reg-error" class="error hidden"></p>
+    </form>
+  </div>
+</div>
+
+<!-- ═══════════════════ APP SCREEN ═══════════════════ -->
+<div id="app-screen" class="screen hidden">
+
+  <header>
+    <button id="dashboard-btn" class="icon-btn" title="Dashboard">📊</button>
+    <span class="app-name">Dictato</span>
+    <button id="logout-btn" class="icon-btn" title="Logout">⎋</button>
+  </header>
+
+  <!-- Calorie ring + macro bars -->
+  <div id="hero">
+    <div class="cal-ring-wrap">
+      <svg class="cal-ring" viewBox="0 0 120 120">
+        <defs>
+          <linearGradient id="ringGrad" x1="0" y1="0" x2="1" y2="1">
+            <stop offset="0%" stop-color="#7c6af7"/>
+            <stop offset="100%" stop-color="#4cc9f0"/>
+          </linearGradient>
+        </defs>
+        <circle class="ring-track" cx="60" cy="60" r="52"/>
+        <circle class="ring-fill" id="ring-fill" cx="60" cy="60" r="52"/>
+      </svg>
+      <div class="ring-center">
+        <span class="ring-num" id="ring-num">0</span>
+        <span class="ring-label" id="ring-label">calories</span>
+      </div>
+    </div>
+    <div class="macro-bars">
+      <div class="mbar"><span class="mbar-label">Protein</span><div class="mbar-track"><div class="mbar-fill protein" id="bar-protein"></div></div><span class="mbar-val" id="val-protein">0g</span></div>
+      <div class="mbar"><span class="mbar-label">Carbs</span><div class="mbar-track"><div class="mbar-fill carbs" id="bar-carbs"></div></div><span class="mbar-val" id="val-carbs">0g</span></div>
+      <div class="mbar"><span class="mbar-label">Fat</span><div class="mbar-track"><div class="mbar-fill fat" id="bar-fat"></div></div><span class="mbar-val" id="val-fat">0g</span></div>
+    </div>
+  </div>
+
+  <!-- Water -->
+  <div id="water-row">
+    <span class="water-head">💧 Water <span id="water-count">0 / 8</span></span>
+    <div id="water-glasses"></div>
+  </div>
+
+  <!-- Search + voice input -->
+  <div id="input-area">
+    <div id="search-row">
+      <input type="search" id="food-search" placeholder="Search food or speak…" autocomplete="off" autocorrect="off">
+      <button id="photo-btn" title="Photo entry">📷</button>
+      <button id="voice-btn" title="Voice entry">🎤</button>
+    </div>
+    <input type="file" id="photo-input" accept="image/*" capture="environment" class="hidden">
+    <div id="search-results" class="hidden"></div>
+    <div id="voice-status" class="hidden"></div>
+    <div id="quick-row">
+      <button id="create-food-btn" class="chip chip-create" title="Create a recipe or custom food">＋ Create</button>
+      <div id="quick-picks"></div>
+    </div>
+  </div>
+
+  <!-- Single-item confirm (manual search / single voice result) -->
+  <div id="confirm-panel" class="hidden">
+    <figure id="confirm-photo" class="polaroid hidden">
+      <img alt="Your snapshot">
+      <figcaption class="polaroid-caption">snapshot</figcaption>
+    </figure>
+    <h3>Confirm entry</h3>
+    <div id="confirm-ai-summary" class="ai-summary hidden"></div>
+    <div class="confirm-name-row">
+      <div id="confirm-food-name"></div>
+      <button id="confirm-fav-star" class="fav-star" title="Save as favorite">★</button>
+    </div>
+    <div id="confirm-food-brand"></div>
+    <button id="confirm-change-btn" class="link-btn">Wrong match? Pick a different food</button>
+    <div id="confirm-picker" class="food-picker hidden"></div>
+    <!-- Servings input (shown when the food has a known serving size) -->
+    <div class="confirm-qty-row" id="confirm-servings-row">
+      <label for="confirm-servings">Servings:</label>
+      <input type="number" id="confirm-servings" min="0" step="0.5" value="1">
+      <span class="serving-eq" id="confirm-serving-eq"></span>
+    </div>
+    <!-- Grams input (fallback when no serving size, or to fine-tune) -->
+    <div class="confirm-qty-row" id="confirm-grams-row">
+      <label for="confirm-qty">Grams:</label>
+      <input type="number" id="confirm-qty" min="1" max="9999" step="1" value="100">
+    </div>
+    <div id="confirm-macros"></div>
+    <div class="confirm-btns">
+      <button id="confirm-log-btn" class="btn-primary">Log it</button>
+      <button id="confirm-cancel-btn" class="btn-secondary">Cancel</button>
+    </div>
+  </div>
+
+  <!-- Multi-item voice confirm (e.g. "eggs and toast") -->
+  <div id="multi-confirm-panel" class="hidden">
+    <figure id="multi-confirm-photo" class="polaroid hidden">
+      <img alt="Your snapshot">
+      <figcaption class="polaroid-caption">snapshot</figcaption>
+    </figure>
+    <h3 id="multi-confirm-title">Voice entry</h3>
+    <div id="multi-confirm-summary" class="ai-summary hidden"></div>
+    <div id="multi-confirm-transcript" class="voice-transcript"></div>
+    <div id="multi-confirm-items"></div>
+    <div class="confirm-btns">
+      <button id="multi-confirm-log-btn" class="btn-primary">Log items</button>
+      <button id="multi-confirm-cancel-btn" class="btn-secondary">Cancel</button>
+    </div>
+  </div>
+
+  <!-- Day log with date navigation -->
+  <div id="log-section">
+    <div id="day-nav">
+      <button id="day-prev" class="day-arrow" title="Previous day">‹</button>
+      <span id="day-label">Today</span>
+      <button id="day-next" class="day-arrow" title="Next day">›</button>
+    </div>
+    <div id="log-list"></div>
+  </div>
+
+</div>
+
+<!-- ═══════════════════ DASHBOARD SCREEN ═══════════════════ -->
+<div id="dashboard-screen" class="screen hidden">
+
+  <header>
+    <button id="dash-back-btn" class="icon-btn" title="Back">←</button>
+    <span class="app-name">Dashboard</span>
+    <span style="width:32px"></span>
+  </header>
+
+  <!-- Today vs goals -->
+  <section class="dash-section">
+    <p class="section-heading">Today vs goals</p>
+    <div id="goal-progress"></div>
+  </section>
+
+  <!-- Weekly calories chart -->
+  <section class="dash-section">
+    <div class="dash-section-head">
+      <p class="section-heading">Calories</p>
+      <div class="range-toggle">
+        <button class="range-btn active" data-days="7">7d</button>
+        <button class="range-btn" data-days="30">30d</button>
+      </div>
+    </div>
+    <div id="cal-chart" class="bar-chart"></div>
+    <div id="cal-avg" class="chart-caption"></div>
+  </section>
+
+  <!-- Weekly macro averages -->
+  <section class="dash-section">
+    <p class="section-heading">Daily average macros</p>
+    <div id="macro-averages"></div>
+  </section>
+
+  <!-- Goals editor -->
+  <section class="dash-section">
+    <p class="section-heading">Set goals</p>
+    <form id="goals-form" class="goals-form">
+      <div class="goal-input-row">
+        <label for="goal-cal">Calories</label>
+        <input type="number" id="goal-cal" min="0" max="20000" placeholder="e.g. 2000">
+      </div>
+      <div class="goal-input-row">
+        <label for="goal-protein">Protein (g)</label>
+        <input type="number" id="goal-protein" min="0" max="1000" placeholder="e.g. 150">
+      </div>
+      <div class="goal-input-row">
+        <label for="goal-carbs">Carbs (g)</label>
+        <input type="number" id="goal-carbs" min="0" max="2000" placeholder="e.g. 200">
+      </div>
+      <div class="goal-input-row">
+        <label for="goal-fat">Fat (g)</label>
+        <input type="number" id="goal-fat" min="0" max="1000" placeholder="e.g. 65">
+      </div>
+      <div id="goals-caption" class="goals-caption"></div>
+      <button type="submit" class="btn-primary">Save goals</button>
+    </form>
+  </section>
+
+  <!-- Reminders / push notifications -->
+  <section class="dash-section">
+    <p class="section-heading">Reminders</p>
+    <p class="reminders-intro">Get a nudge to log your meals. We'll ask "have you eaten?" — dismiss it, or tap to log.</p>
+    <button id="enable-push-btn" class="btn-secondary">🔔 Enable notifications</button>
+    <p id="push-status" class="push-status"></p>
+
+    <div id="reminders-controls" class="hidden">
+      <div id="reminders-list"></div>
+      <div class="reminder-add">
+        <input type="time" id="reminder-time" value="12:00">
+        <button id="add-reminder-btn" class="btn-secondary">+ Add time</button>
+      </div>
+      <button id="test-push-btn" class="link-btn">Send a test notification</button>
+    </div>
+    <p id="ios-push-hint" class="push-hint hidden">
+      On iPhone/iPad, notifications only work after you <strong>Add to Home Screen</strong> and open the app from there.
+    </p>
+  </section>
+
+</div>
+
+<!-- Voice capture overlay -->
+<div id="voice-overlay" class="hidden">
+  <div class="voice-overlay-card">
+    <div class="voice-pulse-ring"><span class="voice-pulse-mic">🎤</span></div>
+    <div class="voice-overlay-status" id="voice-overlay-status">Listening…</div>
+    <div class="voice-overlay-transcript" id="voice-overlay-transcript">
+      <span class="voice-hint">Say something like "I had a rice cake"</span>
+    </div>
+    <div class="voice-overlay-btns">
+      <button id="voice-overlay-stop" class="btn-primary">Done</button>
+      <button id="voice-overlay-cancel" class="btn-secondary">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<!-- Brand not found — options -->
+<div id="brand-miss-overlay" class="hidden">
+  <div class="create-card">
+    <div class="create-head">
+      <h3>Brand not found</h3>
+      <button id="bm-close" class="icon-btn" title="Close">✕</button>
+    </div>
+    <p id="bm-msg" class="reminders-intro"></p>
+    <div class="bm-options">
+      <button id="bm-web" class="btn-primary">🔎 Look it up online</button>
+      <button id="bm-create" class="btn-secondary">✏️ Create it myself</button>
+      <button id="bm-generic" class="btn-secondary"></button>
+    </div>
+    <p id="bm-status" class="push-status"></p>
+  </div>
+</div>
+
+<!-- Create recipe / custom food modal -->
+<div id="create-overlay" class="hidden">
+  <div class="create-card">
+    <div class="create-head">
+      <h3 id="create-title">New food</h3>
+      <button id="create-close" class="icon-btn" title="Close">✕</button>
+    </div>
+
+    <input type="text" id="cf-name" placeholder="Name (e.g. Stew, My Coffee)">
+
+    <div class="create-tabs">
+      <button class="ctab active" data-mode="ingredients">From ingredients</button>
+      <button class="ctab" data-mode="manual">Quick macros</button>
+    </div>
+
+    <!-- Ingredients mode -->
+    <div id="cf-ingredients-mode">
+      <div class="cf-serving-row">
+        <label>Makes</label>
+        <input type="number" id="cf-servings" min="0.5" step="0.5" value="1">
+        <input type="text" id="cf-serving-label" placeholder="bowl, cup…">
+      </div>
+      <div id="cf-ingredient-list"></div>
+      <div id="cf-add-ingredient" class="food-picker"></div>
+      <button id="cf-add-ingredient-btn" class="btn-secondary">+ Add ingredient</button>
+      <div id="cf-preview" class="cf-preview"></div>
+    </div>
+
+    <!-- Manual macros mode -->
+    <div id="cf-manual-mode" class="hidden">
+      <div id="cf-web-note" class="cf-web-note hidden"></div>
+      <div class="cf-serving-row">
+        <label>Per</label>
+        <input type="text" id="cf-manual-label" placeholder="cup, serving…">
+      </div>
+      <div class="goal-input-row"><label>Calories</label><input type="number" id="cf-cal" min="0" placeholder="0"></div>
+      <div class="goal-input-row"><label>Protein (g)</label><input type="number" id="cf-protein" min="0" placeholder="0"></div>
+      <div class="goal-input-row"><label>Carbs (g)</label><input type="number" id="cf-carbs" min="0" placeholder="0"></div>
+      <div class="goal-input-row"><label>Fat (g)</label><input type="number" id="cf-fat" min="0" placeholder="0"></div>
+    </div>
+
+    <div class="confirm-btns">
+      <button id="cf-save-btn" class="btn-primary">Save</button>
+      <button id="cf-cancel-btn" class="btn-secondary">Cancel</button>
+    </div>
+
+    <div id="cf-mine">
+      <p class="section-heading">My foods &amp; recipes</p>
+      <div id="cf-mine-list"></div>
+    </div>
+  </div>
+</div>
+
+<!-- Toast notification -->
+<div id="toast"></div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
