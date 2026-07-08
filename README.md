@@ -49,6 +49,7 @@ pytest tests/ -v
 | POST | `/api/auth/login` | Login |
 | POST | `/api/auth/logout` | Logout |
 | GET | `/api/auth/me` | Current user |
+| DELETE | `/api/auth/account` | Delete account + all data (requires password in body) |
 | GET | `/api/foods/search?q=` | Search foods |
 | GET | `/api/foods/{id}` | Get food by id |
 | GET | `/api/log/today?date=&tz_offset=` | A local day's entries (date defaults to today) |
@@ -57,6 +58,8 @@ pytest tests/ -v
 | GET | `/api/log/summary?days=&tz_offset=` | Per-day calorie/macro totals (1–90 days) |
 | POST | `/api/agent/log` | Voice/photo/text logging agent (multipart `audio`, `image`, or `text`) — transcribes, grounds each item in the food DB, and logs it |
 | GET | `/api/agent/usage` | Today's AI usage + daily limit |
+| GET | `/api/coach/history` | Coach chat history + accumulated profile |
+| POST | `/api/coach/chat` | Ask the coach (reads your logs/notes/goals/profile; remembers facts) |
 | PUT | `/api/auth/goals` | Set calorie + macro goals |
 | GET | `/api/push/vapid-key` | Public VAPID key for the browser |
 | POST | `/api/push/subscribe` · `/unsubscribe` · `/test` | Manage/ test web-push subscriptions |

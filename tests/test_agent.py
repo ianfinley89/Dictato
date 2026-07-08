@@ -360,3 +360,44 @@ def test_audio_upload_undecodable_422(client, monkeypatch):
     _register(client)
     r = client.post("/api/agent/log", files={"audio": ("a.webm", io.BytesIO(b"junk"), "audio/webm")})
     assert r.status_code == 422
+
+
+# ── Capture log (raw voice/photo/text kept for later analysis) ────────────────
+
+def test_capture_log_records_fast_path(client):
+    uid = _register(client)
+    food_id = _seed_food()
+    _log_once(uid, food_id)
+
+    client.post("/api/agent/log", data={"text": "I had two rice cakes"})
+
+    from app.database import get_conn
+    with get_conn() as conn:
+        rows = conn.execute("SELECT * FROM capture_log WHERE user_id=?", (uid,)).fetchall()
+    assert len(rows) == 1
+    r = rows[0]
+    assert r["input_type"] == "text"
+    assert r["transcript"] == "I had two rice cakes"
+    assert r["fast_path"] == 1
+    entries = json.loads(r["entries_json"])
+    assert entries and entries[0]["food_name"] == "rice cake"
+
+
+def test_capture_log_records_voice_input_type(client, monkeypatch):
+    from app.routers import agent as agent_router
+
+    async def fake_transcribe(blob):
+        return "I had two rice cakes"
+
+    monkeypatch.setattr(agent_router.stt, "transcribe", fake_transcribe)
+    uid = _register(client)
+    food_id = _seed_food()
+    _log_once(uid, food_id)
+
+    client.post("/api/agent/log", files={"audio": ("a.webm", io.BytesIO(b"x"), "audio/webm")})
+
+    from app.database import get_conn
+    with get_conn() as conn:
+        r = conn.execute("SELECT * FROM capture_log WHERE user_id=?", (uid,)).fetchone()
+    assert r["input_type"] == "voice"
+    assert r["transcript"] == "I had two rice cakes"

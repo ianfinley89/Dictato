@@ -121,8 +121,40 @@ CREATE TABLE IF NOT EXISTS ai_usage (
     UNIQUE(user_id, day)
 );
 
+-- Every voice/photo/text capture, kept verbatim so we can analyze eating
+-- patterns and coach the user later (what they said, what got logged, when).
+CREATE TABLE IF NOT EXISTS capture_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL REFERENCES users(id),
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    input_type TEXT NOT NULL,          -- 'voice' | 'photo' | 'text'
+    transcript TEXT,                   -- voice-to-text or typed text (null for photo-only)
+    summary TEXT,                      -- the agent's one-line "what I logged" sentence
+    entries_json TEXT,                 -- snapshot of what got logged (names, qty, macros)
+    fast_path INTEGER NOT NULL DEFAULT 0
+);
+
+-- Durable per-user profile the coach builds up over time: goals context,
+-- dietary facts, trends, preferences. facts_json is a free-form JSON blob.
+CREATE TABLE IF NOT EXISTS user_profile (
+    user_id INTEGER PRIMARY KEY REFERENCES users(id),
+    facts_json TEXT NOT NULL DEFAULT '{}',
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- Coach chat history so conversations persist across sessions.
+CREATE TABLE IF NOT EXISTS coach_messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL REFERENCES users(id),
+    role TEXT NOT NULL,                -- 'user' | 'assistant'
+    content TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 CREATE INDEX IF NOT EXISTS idx_log_user_eaten ON log_entries(user_id, eaten_at);
 CREATE INDEX IF NOT EXISTS idx_foods_name ON foods(name);
+CREATE INDEX IF NOT EXISTS idx_capture_user_created ON capture_log(user_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_coach_user_created ON coach_messages(user_id, created_at);
 """
 
 

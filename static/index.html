@@ -41,14 +41,23 @@
   </div>
 </div>
 
-<!-- ═══════════════════ APP SCREEN ═══════════════════ -->
-<div id="app-screen" class="screen hidden">
+<!-- ═══════════════════ TOP NAV (shown once logged in) ═══════════════════ -->
+<nav id="topnav" class="hidden">
+  <div class="topnav-inner">
+    <div class="topnav-left">
+      <span class="app-name">Dictato</span>
+      <button class="topnav-btn active" data-pane="home">Home</button>
+    </div>
+    <div class="topnav-right">
+      <button class="topnav-btn" data-pane="log">Log</button>
+      <button class="topnav-btn" data-pane="coach">Coach</button>
+      <button class="topnav-btn" data-pane="settings">Settings</button>
+    </div>
+  </div>
+</nav>
 
-  <header>
-    <button id="dashboard-btn" class="icon-btn" title="Dashboard">📊</button>
-    <span class="app-name">Dictato</span>
-    <button id="logout-btn" class="icon-btn" title="Logout">⎋</button>
-  </header>
+<!-- ═══════════════════ HOME PANE — capture only ═══════════════════ -->
+<div id="app-screen" class="screen hidden">
 
   <!-- Calorie ring + macro bars -->
   <div id="hero">
@@ -77,57 +86,34 @@
 
   <!-- Water -->
   <div id="water-row">
-    <span class="water-head">💧 Water <span id="water-count">0 / 8</span></span>
+    <span class="water-head">
+      <svg class="icon water-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 2.69l5.66 5.66a8 8 0 1 1-11.31 0z"/></svg>
+      Water <span id="water-count">0 / 8</span>
+    </span>
     <div id="water-glasses"></div>
   </div>
 
-  <!-- Search + voice input -->
+  <!-- Capture: voice and photo lead; manual search is tucked behind a toggle -->
   <div id="input-area">
-    <div id="search-row">
-      <input type="search" id="food-search" placeholder="Search food or speak…" autocomplete="off" autocorrect="off">
-      <button id="photo-btn" title="Photo entry">📷</button>
-      <button id="voice-btn" title="Voice entry">🎤</button>
+    <div id="capture-row">
+      <button id="voice-btn" class="capture-btn capture-primary" title="Voice entry">
+        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="22"/></svg>
+        <span>Say it</span>
+      </button>
+      <button id="photo-btn" class="capture-btn" title="Photo entry">
+        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>
+        <span>Snap it</span>
+      </button>
     </div>
     <input type="file" id="photo-input" accept="image/*" capture="environment" class="hidden">
-    <div id="search-results" class="hidden"></div>
     <div id="voice-status" class="hidden"></div>
-    <div id="quick-row">
-      <button id="create-food-btn" class="chip chip-create" title="Create a recipe or custom food">＋ Create</button>
-      <div id="quick-picks"></div>
-    </div>
-  </div>
-
-  <!-- Single-item confirm (manual search / single voice result) -->
-  <div id="confirm-panel" class="hidden">
-    <figure id="confirm-photo" class="polaroid hidden">
-      <img alt="Your snapshot">
-      <figcaption class="polaroid-caption">snapshot</figcaption>
-    </figure>
-    <h3>Confirm entry</h3>
-    <div id="confirm-ai-summary" class="ai-summary hidden"></div>
-    <div class="confirm-name-row">
-      <div id="confirm-food-name"></div>
-      <button id="confirm-fav-star" class="fav-star" title="Save as favorite">★</button>
-    </div>
-    <div id="confirm-food-brand"></div>
-    <div id="confirm-source" class="confirm-source hidden"></div>
-    <button id="confirm-change-btn" class="link-btn">Wrong match? Pick a different food</button>
-    <div id="confirm-picker" class="food-picker hidden"></div>
-    <!-- Servings input (shown when the food has a known serving size) -->
-    <div class="confirm-qty-row" id="confirm-servings-row">
-      <label for="confirm-servings">Servings:</label>
-      <input type="number" id="confirm-servings" min="0" step="0.5" value="1">
-      <span class="serving-eq" id="confirm-serving-eq"></span>
-    </div>
-    <!-- Grams input (fallback when no serving size, or to fine-tune) -->
-    <div class="confirm-qty-row" id="confirm-grams-row">
-      <label for="confirm-qty">Grams:</label>
-      <input type="number" id="confirm-qty" min="1" max="9999" step="1" value="100">
-    </div>
-    <div id="confirm-macros"></div>
-    <div class="confirm-btns">
-      <button id="confirm-log-btn" class="btn-primary">Log it</button>
-      <button id="confirm-cancel-btn" class="btn-secondary">Cancel</button>
+    <button id="manual-toggle" class="link-btn">Add manually instead</button>
+    <div id="manual-panel" class="hidden">
+      <input type="search" id="food-search" placeholder="Search foods…" autocomplete="off" autocorrect="off">
+      <div id="search-results" class="hidden"></div>
+      <div id="quick-row">
+        <div id="quick-picks"></div>
+      </div>
     </div>
   </div>
 
@@ -137,7 +123,7 @@
       <img alt="Your snapshot">
       <figcaption class="polaroid-caption">snapshot</figcaption>
     </figure>
-    <h3>Logged ✓</h3>
+    <h3><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg> Logged</h3>
     <div id="result-transcript" class="voice-transcript hidden"></div>
     <div id="result-summary" class="ai-summary"></div>
     <div id="result-entries"></div>
@@ -146,26 +132,24 @@
     </div>
   </div>
 
+</div>
+
+<!-- ═══════════════════ LOG PANE — journal, analytics & your foods ═══════════════════ -->
+<div id="log-screen" class="screen sub-screen hidden">
+
   <!-- Day log with date navigation -->
   <div id="log-section">
     <div id="day-nav">
-      <button id="day-prev" class="day-arrow" title="Previous day">‹</button>
+      <button id="day-prev" class="day-arrow" title="Previous day">
+        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="15 18 9 12 15 6"/></svg>
+      </button>
       <span id="day-label">Today</span>
-      <button id="day-next" class="day-arrow" title="Next day">›</button>
+      <button id="day-next" class="day-arrow" title="Next day">
+        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="9 18 15 12 9 6"/></svg>
+      </button>
     </div>
     <div id="log-list"></div>
   </div>
-
-</div>
-
-<!-- ═══════════════════ DASHBOARD SCREEN ═══════════════════ -->
-<div id="dashboard-screen" class="screen hidden">
-
-  <header>
-    <button id="dash-back-btn" class="icon-btn" title="Back">←</button>
-    <span class="app-name">Dashboard</span>
-    <span style="width:32px"></span>
-  </header>
 
   <!-- Today vs goals -->
   <section class="dash-section">
@@ -173,7 +157,7 @@
     <div id="goal-progress"></div>
   </section>
 
-  <!-- Weekly calories chart -->
+  <!-- Calories chart -->
   <section class="dash-section">
     <div class="dash-section-head">
       <p class="section-heading">Calories</p>
@@ -186,11 +170,26 @@
     <div id="cal-avg" class="chart-caption"></div>
   </section>
 
-  <!-- Weekly macro averages -->
+  <!-- Macro averages -->
   <section class="dash-section">
     <p class="section-heading">Daily average macros</p>
     <div id="macro-averages"></div>
   </section>
+
+  <!-- My foods & recipes -->
+  <section class="dash-section">
+    <p class="section-heading">My foods &amp; recipes</p>
+    <p class="reminders-intro">Build recipes from ingredients, or save custom foods with their macros — they show up first in search and as quick picks.</p>
+    <button id="create-food-btn" class="btn-secondary btn-with-icon">
+      <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+      New food or recipe
+    </button>
+  </section>
+
+</div>
+
+<!-- ═══════════════════ SETTINGS PANE ═══════════════════ -->
+<div id="settings-screen" class="screen sub-screen hidden">
 
   <!-- Goals editor -->
   <section class="dash-section">
@@ -219,9 +218,12 @@
 
   <!-- Reminders / push notifications -->
   <section class="dash-section">
-    <p class="section-heading">Reminders</p>
+    <p class="section-heading">Notifications</p>
     <p class="reminders-intro">Get a nudge to log your meals. We'll ask "have you eaten?" — dismiss it, or tap to log.</p>
-    <button id="enable-push-btn" class="btn-secondary">🔔 Enable notifications</button>
+    <button id="enable-push-btn" class="btn-secondary btn-with-icon">
+      <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>
+      Enable notifications
+    </button>
     <p id="push-status" class="push-status"></p>
 
     <div id="reminders-controls" class="hidden">
@@ -237,6 +239,80 @@
     </p>
   </section>
 
+  <!-- Account -->
+  <section class="dash-section">
+    <p class="section-heading">Account</p>
+    <div class="acct-row"><span class="acct-label">Name</span><span id="acct-name" class="acct-value"></span></div>
+    <div class="acct-row"><span class="acct-label">Email</span><span id="acct-email" class="acct-value"></span></div>
+    <button id="logout-btn" class="btn-secondary btn-with-icon">
+      <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
+      Log out
+    </button>
+
+    <div class="danger-zone">
+      <p class="danger-title">Delete account</p>
+      <p class="reminders-intro">Permanently deletes your account and every entry, recipe, and setting. This cannot be undone.</p>
+      <input type="password" id="delete-password" placeholder="Confirm your password" autocomplete="current-password">
+      <button id="delete-account-btn" class="btn-danger">Delete my account &amp; data</button>
+    </div>
+  </section>
+
+</div>
+
+<!-- ═══════════════════ COACH PANE ═══════════════════ -->
+<div id="coach-screen" class="screen sub-screen hidden">
+  <div id="coach-chat">
+    <div id="coach-messages"></div>
+    <div id="coach-suggestions">
+      <button class="coach-suggest" data-prompt="How am I tracking against my goals lately?">How am I tracking?</button>
+      <button class="coach-suggest" data-prompt="Analyze my last week of eating and suggest one thing to improve.">Analyze my week</button>
+      <button class="coach-suggest" data-prompt="Am I eating enough protein for my goals?">Enough protein?</button>
+    </div>
+  </div>
+  <form id="coach-composer">
+    <input type="text" id="coach-input" placeholder="Ask your coach anything…" autocomplete="off">
+    <button type="submit" id="coach-send" class="btn-primary" title="Send">
+      <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+    </button>
+  </form>
+</div>
+
+<!-- Single-item confirm (manual add / adjust an entry) — modal, works from any pane -->
+<div id="confirm-overlay" class="hidden">
+  <div id="confirm-panel">
+    <figure id="confirm-photo" class="polaroid hidden">
+      <img alt="Your snapshot">
+      <figcaption class="polaroid-caption">snapshot</figcaption>
+    </figure>
+    <h3>Confirm entry</h3>
+    <div id="confirm-ai-summary" class="ai-summary hidden"></div>
+    <div class="confirm-name-row">
+      <div id="confirm-food-name"></div>
+      <button id="confirm-fav-star" class="fav-star" title="Save as favorite">
+        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" aria-hidden="true"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
+      </button>
+    </div>
+    <div id="confirm-food-brand"></div>
+    <div id="confirm-source" class="confirm-source hidden"></div>
+    <button id="confirm-change-btn" class="link-btn">Wrong match? Pick a different food</button>
+    <div id="confirm-picker" class="food-picker hidden"></div>
+    <!-- Servings input (shown when the food has a known serving size) -->
+    <div class="confirm-qty-row" id="confirm-servings-row">
+      <label for="confirm-servings">Servings:</label>
+      <input type="number" id="confirm-servings" min="0" step="0.5" value="1">
+      <span class="serving-eq" id="confirm-serving-eq"></span>
+    </div>
+    <!-- Grams input (fallback when no serving size, or to fine-tune) -->
+    <div class="confirm-qty-row" id="confirm-grams-row">
+      <label for="confirm-qty">Grams:</label>
+      <input type="number" id="confirm-qty" min="1" max="9999" step="1" value="100">
+    </div>
+    <div id="confirm-macros"></div>
+    <div class="confirm-btns">
+      <button id="confirm-log-btn" class="btn-primary">Log it</button>
+      <button id="confirm-cancel-btn" class="btn-secondary">Cancel</button>
+    </div>
+  </div>
 </div>
 
 <!-- Voice capture overlay -->
@@ -247,7 +323,9 @@
         <circle class="voice-spinner-track" cx="60" cy="60" r="54"></circle>
         <circle class="voice-spinner-arc" cx="60" cy="60" r="54"></circle>
       </svg>
-      <div class="voice-pulse-ring"><span class="voice-pulse-mic">🎤</span></div>
+      <div class="voice-pulse-ring">
+        <svg class="icon voice-pulse-mic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="22"/></svg>
+      </div>
     </div>
     <div class="voice-overlay-status" id="voice-overlay-status">Recording…</div>
     <div class="voice-overlay-transcript" id="voice-overlay-transcript">
@@ -265,7 +343,9 @@
   <div class="create-card">
     <div class="create-head">
       <h3 id="create-title">New food</h3>
-      <button id="create-close" class="icon-btn" title="Close">✕</button>
+      <button id="create-close" class="icon-btn" title="Close">
+        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+      </button>
     </div>
 
     <input type="text" id="cf-name" placeholder="Name (e.g. Stew, My Coffee)">

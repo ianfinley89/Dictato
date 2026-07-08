@@ -5,7 +5,7 @@ from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from app.database import init_db
-from app.routers import agent, auth, foods, log, push, reminders, recipes
+from app.routers import agent, auth, coach, foods, log, push, reminders, recipes
 from app.services.scheduler import reminder_loop
 
 
@@ -28,6 +28,7 @@ app = FastAPI(title="Dictato", lifespan=lifespan)
 
 app.include_router(agent.router)
 app.include_router(auth.router)
+app.include_router(coach.router)
 app.include_router(foods.router)
 app.include_router(log.router)
 app.include_router(push.router)

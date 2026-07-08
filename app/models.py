@@ -34,6 +34,10 @@ class GoalsUpdate(BaseModel):
     fat_g: Optional[float] = None
 
 
+class DeleteAccountRequest(BaseModel):
+    password: str          # re-confirmed so a stolen session can't wipe data
+
+
 class PushSubscription(BaseModel):
     endpoint: str
     keys: dict

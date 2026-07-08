@@ -1,4 +1,4 @@
-const CACHE = 'dictato-v19';
+const CACHE = 'dictato-v23';
 const PRECACHE = ['/static/style.css', '/static/app.js'];
 
 self.addEventListener('install', e => {

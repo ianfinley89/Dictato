@@ -36,7 +36,7 @@ const authScreen = $('auth-screen');
 const appScreen = $('app-screen');
 const loginForm = $('login-form');
 const registerForm = $('register-form');
-const confirmPanel = $('confirm-panel');
+const confirmOverlay = $('confirm-overlay');
 const confirmQty = $('confirm-qty');
 const confirmServings = $('confirm-servings');
 const confirmServingsRow = $('confirm-servings-row');
@@ -51,7 +51,22 @@ const photoInput = $('photo-input');
 const logList = $('log-list');
 const toast = $('toast');
 const appScreenEl = $('app-screen');
-const dashboardScreen = $('dashboard-screen');
+
+// ── Inline SVG icons (stroke-based, sized by font, inherit currentColor) ─────
+const ICONS = {
+  mic: '<path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="22"/>',
+  camera: '<path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/>',
+  pencil: '<path d="M17 3a2.83 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5z"/>',
+  users: '<path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/>',
+  drop: '<path d="M12 2.69l5.66 5.66a8 8 0 1 1-11.31 0z"/>',
+  x: '<line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>',
+  star: '<polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/>',
+  db: '<ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/>',
+};
+
+function icon(name, cls = '') {
+  return `<svg class="icon${cls ? ' ' + cls : ''}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICONS[name] || ''}</svg>`;
+}
 
 // ── Toast ───────────────────────────────────────────────────────────────────
 let toastTimer;
@@ -114,16 +129,17 @@ registerForm.addEventListener('submit', async e => {
 
 $('logout-btn').addEventListener('click', async () => {
   await api.post('/api/auth/logout', {});
-  state.user = null;
-  authScreen.classList.remove('hidden');
-  appScreen.classList.add('hidden');
+  leaveApp();
 });
 
 // ── App init ─────────────────────────────────────────────────────────────────
 async function showApp() {
   authScreen.classList.add('hidden');
-  appScreen.classList.remove('hidden');
-  await goToToday();   // loads the day log + quick-picks (the date shows in #day-nav)
+  $('topnav').classList.remove('hidden');
+  // Login/register responses carry only id+name; fetch the full profile
+  // (email for the account pane, goals for the ring).
+  try { state.user = await api.get('/api/auth/me'); } catch { /* keep what we have */ }
+  await showPane('home');
 }
 
 // ── Day navigation ────────────────────────────────────────────────────────────
@@ -166,6 +182,15 @@ function renderDayNav() {
 
 $('day-prev').addEventListener('click', () => shiftDay(-1));
 $('day-next').addEventListener('click', () => shiftDay(1));
+
+// ── Manual add (search) panel — tucked behind a toggle; voice/photo lead ─────
+$('manual-toggle').addEventListener('click', () => {
+  const panel = $('manual-panel');
+  const open = panel.classList.toggle('hidden');
+  $('manual-toggle').textContent = open ? 'Add manually instead' : 'Hide manual add';
+  if (!open) searchInput.focus();
+  else { hideSearch(); searchInput.value = ''; }
+});
 
 // ── Food search ───────────────────────────────────────────────────────────────
 let searchDebounce;
@@ -243,7 +268,7 @@ function openConfirm(food, defaultGrams = 100, source = 'manual', defaultServing
   setAiSummary($('confirm-ai-summary'), summary);
   $('confirm-picker').classList.add('hidden');   // reset any open picker
   applyConfirmFood(food, defaultGrams, defaultServings);
-  confirmPanel.classList.remove('hidden');
+  confirmOverlay.classList.remove('hidden');
   const lead = _servingMode ? confirmServings : confirmQty;
   lead.focus();
   lead.select();
@@ -257,7 +282,7 @@ function applyConfirmFood(food, defaultGrams = 100, defaultServings = null) {
   $('confirm-food-brand').textContent = food.brand || '';
   const srcEl = $('confirm-source');
   const srcLabel = foodSourceLabel(food.source);
-  srcEl.textContent = srcLabel ? `📊 Nutrition from ${srcLabel}` : '';
+  srcEl.innerHTML = srcLabel ? `${icon('db')} Nutrition from ${esc(srcLabel)}` : '';
   srcEl.classList.toggle('hidden', !srcLabel);
   renderFavStar();
 
@@ -318,7 +343,7 @@ $('confirm-log-btn').addEventListener('click', async () => {
   const foodName = state.pendingFood.name;
   try {
     await api.post('/api/log/', { food_id: state.pendingFood.id, quantity_g: qty, source: _confirmSource });
-    confirmPanel.classList.add('hidden');
+    confirmOverlay.classList.add('hidden');
     state.pendingFood = null;
     showToast(`Logged ${foodName}!`, 'success');
     await goToToday();   // new entries land on today — show it
@@ -333,7 +358,7 @@ function _trimNum(x) {
 }
 
 $('confirm-cancel-btn').addEventListener('click', () => {
-  confirmPanel.classList.add('hidden');
+  confirmOverlay.classList.add('hidden');
   state.pendingFood = null;
 });
 
@@ -360,7 +385,7 @@ function showResultCard(result, photoUrl = '') {
   t.classList.toggle('hidden', !showTranscript);
   renderResultEntries(result.entries || []);
   $('result-card').classList.remove('hidden');
-  confirmPanel.classList.add('hidden');
+  confirmOverlay.classList.add('hidden');
 }
 
 function renderResultEntries(entries) {
@@ -373,7 +398,7 @@ function renderResultEntries(entries) {
     <div class="result-entry" data-id="${e.id}">
       <div class="result-entry-info">
         <div class="result-entry-name">${esc(e.food_name)}${e.food_brand ? ' · ' + esc(e.food_brand) : ''}</div>
-        <div class="result-entry-meta">${Math.round(e.quantity_g)}g · ${e.calories.toFixed(0)} cal · 📊 ${esc(e.food_source || '')}</div>
+        <div class="result-entry-meta">${Math.round(e.quantity_g)}g · ${e.calories.toFixed(0)} cal · ${icon('db')} ${esc(e.food_source || '')}</div>
       </div>
       <button class="result-adjust link-btn" data-id="${e.id}" data-food="${e.food_id}" data-qty="${e.quantity_g}">Adjust</button>
       <button class="result-undo link-btn" data-id="${e.id}">Undo</button>
@@ -389,18 +414,9 @@ function renderResultEntries(entries) {
     });
   });
 
-  // Adjust = undo the entry, then reopen the classic confirm panel prefilled
-  // with the same food/quantity so the user can correct and re-log it.
   wrap.querySelectorAll('.result-adjust').forEach(btn => {
-    btn.addEventListener('click', async () => {
-      try {
-        const food = await api.get(`/api/foods/${btn.dataset.food}`);
-        await api.del(`/api/log/${btn.dataset.id}`);
-        await goToToday();
-        $('result-card').classList.add('hidden');
-        openConfirm(food, parseFloat(btn.dataset.qty) || 100, 'manual');
-      } catch (err) { showToast(err.message, 'error'); }
-    });
+    btn.addEventListener('click', () =>
+      adjustEntry(btn.dataset.id, btn.dataset.food, btn.dataset.qty));
   });
 }
 
@@ -492,24 +508,36 @@ function mealOf(eatenAt) {
 }
 
 function entryHtml(e) {
-  return `<div class="log-entry">
+  return `<div class="log-entry" data-id="${e.id}" data-food="${e.food_id}" data-qty="${e.quantity_g}">
     <span class="log-source-icon">${sourceIcon(e.source)}</span>
     <div class="log-info">
       <div class="log-name">${esc(e.food_name)}</div>
       <div class="log-meta">${e.quantity_g}g${e.food_brand ? ' · ' + esc(e.food_brand) : ''}</div>
-      ${e.food_source ? `<div class="log-src">📊 ${esc(e.food_source)}</div>` : ''}
+      ${e.food_source ? `<div class="log-src">${icon('db')} ${esc(e.food_source)}</div>` : ''}
     </div>
     <div class="log-nutrition">
       <div class="log-cal">${e.calories.toFixed(0)}</div>
       <div class="log-macros">P${e.protein_g.toFixed(0)} C${e.carbs_g.toFixed(0)} F${e.fat_g.toFixed(0)}</div>
     </div>
-    <button class="log-delete" data-id="${e.id}" title="Remove">✕</button>
+    <button class="log-delete" data-id="${e.id}" title="Remove">${icon('x')}</button>
   </div>`;
+}
+
+// Tap an entry to adjust it: remove it, then reopen the confirm panel prefilled
+// with the same food and quantity so it can be corrected and re-logged.
+async function adjustEntry(entryId, foodId, qty) {
+  try {
+    const food = await api.get(`/api/foods/${foodId}`);
+    await api.del(`/api/log/${entryId}`);
+    await goToToday();
+    $('result-card').classList.add('hidden');
+    openConfirm(food, parseFloat(qty) || 100, 'manual');
+  } catch (err) { showToast(err.message, 'error'); }
 }
 
 function renderLog() {
   if (!state.dayLog.length) {
-    logList.innerHTML = '<p class="empty-state">Nothing logged today.<br>Search a food or tap the mic 🎤</p>';
+    logList.innerHTML = '<p class="empty-state">Nothing logged yet.<br>Say it, snap it, or add it manually.</p>';
     return;
   }
 
@@ -550,6 +578,12 @@ function renderLog() {
         showToast(err.message, 'error');
       }
     });
+  });
+
+  // Tap anywhere else on an entry to adjust its quantity / swap the food.
+  logList.querySelectorAll('.log-entry').forEach(el => {
+    el.addEventListener('click', () =>
+      adjustEntry(el.dataset.id, el.dataset.food, el.dataset.qty));
   });
 }
 
@@ -608,7 +642,7 @@ function renderWater(glasses, goal) {
   const n = Math.max(goal, glasses);
   const el = $('water-glasses');
   el.innerHTML = Array.from({ length: n }, (_, i) =>
-    `<span class="glass${i < glasses ? ' filled' : ''}" data-i="${i}">💧</span>`).join('');
+    `<span class="glass${i < glasses ? ' filled' : ''}" data-i="${i}">${icon('drop')}</span>`).join('');
   el.querySelectorAll('.glass').forEach(g => {
     g.addEventListener('click', () => {
       const i = +g.dataset.i;
@@ -695,6 +729,7 @@ async function startVoiceCapture() {
   }
 
   voiceStatus.classList.add('hidden');
+  $('result-card').classList.add('hidden');   // a new capture hands the last one to the log
   recChunks = [];
   recCancelled = false;
   const mime = pickAudioMime();
@@ -712,7 +747,7 @@ async function startVoiceCapture() {
     if (recCancelled) return;
     const blob = new Blob(recChunks, { type: mediaRecorder.mimeType || 'audio/webm' });
     if (blob.size < 1000) {
-      showVoiceMsg("Didn't record anything — tap 🎤 and try again.", 5000);
+      showVoiceMsg("Didn't record anything — tap Say it and try again.", 5000);
       return;
     }
     submitAgentLog({ audio: blob });
@@ -772,6 +807,7 @@ photoInput.addEventListener('change', async () => {
   if (!file) return;
 
   photoBtn.classList.add('busy');
+  $('result-card').classList.add('hidden');   // a new capture hands the last one to the log
   voiceStatus.textContent = 'Compressing photo…';
   voiceStatus.classList.remove('hidden');
 
@@ -818,14 +854,42 @@ function compressImage(file, maxEdge, quality) {
   });
 }
 
-// ── Dashboard ─────────────────────────────────────────────────────────────────
-let _dashDays = 7;
+// ── Pane navigation (top nav) ─────────────────────────────────────────────────
+// Home = capture + the immediate result; Log = journal, analytics & your foods;
+// Coach = on-demand chat over your data; Settings = goals, notifications, account.
+// Leaving Home hands the result card over to the log.
+const PANES = {
+  home: appScreenEl, log: $('log-screen'),
+  coach: $('coach-screen'), settings: $('settings-screen'),
+};
 
-$('dashboard-btn').addEventListener('click', openDashboard);
-$('dash-back-btn').addEventListener('click', () => {
-  dashboardScreen.classList.add('hidden');
-  appScreenEl.classList.remove('hidden');
-});
+async function showPane(name) {
+  Object.entries(PANES).forEach(([k, el]) => el.classList.toggle('hidden', k !== name));
+  document.querySelectorAll('.topnav-btn').forEach(b =>
+    b.classList.toggle('active', b.dataset.pane === name));
+  $('result-card').classList.add('hidden');
+  confirmOverlay.classList.add('hidden');
+
+  if (name === 'home') {
+    await goToToday();
+  } else if (name === 'log') {
+    await loadDayLog();
+    renderGoalProgress();
+    await loadChart();
+  } else if (name === 'coach') {
+    await loadCoach();
+  } else if (name === 'settings') {
+    prefillGoals();
+    renderAccount();
+    initReminders();
+  }
+}
+
+document.querySelectorAll('.topnav-btn').forEach(btn =>
+  btn.addEventListener('click', () => showPane(btn.dataset.pane)));
+
+// ── Log pane: chart range + account section ───────────────────────────────────
+let _dashDays = 7;
 
 document.querySelectorAll('.range-btn').forEach(btn => {
   btn.addEventListener('click', () => {
@@ -836,14 +900,104 @@ document.querySelectorAll('.range-btn').forEach(btn => {
   });
 });
 
-async function openDashboard() {
-  appScreenEl.classList.add('hidden');
-  dashboardScreen.classList.remove('hidden');
-  prefillGoals();
-  renderGoalProgress();
-  initReminders();
-  await loadChart();
+function renderAccount() {
+  const u = state.user || {};
+  $('acct-name').textContent = u.display_name || '';
+  $('acct-email').textContent = u.email || '';
 }
+
+$('delete-account-btn').addEventListener('click', async () => {
+  const pw = $('delete-password').value;
+  if (!pw) { showToast('Enter your password to confirm.', 'error'); return; }
+  if (!confirm('Delete your account and ALL of your data? This cannot be undone.')) return;
+  try {
+    await api._req('DELETE', '/api/auth/account', { password: pw });
+    $('delete-password').value = '';
+    leaveApp();
+    showToast('Your account and data have been deleted.');
+  } catch (err) {
+    showToast(err.message, 'error');
+  }
+});
+
+// Hide the app chrome and return to the auth screen (logout / account deletion).
+function leaveApp() {
+  state.user = null;
+  _coachLoaded = false;
+  $('coach-messages').innerHTML = '';
+  Object.values(PANES).forEach(el => el.classList.add('hidden'));
+  $('topnav').classList.add('hidden');
+  authScreen.classList.remove('hidden');
+}
+
+// ── Coach: on-demand chat over the user's own logs, notes, goals & profile ────
+let _coachLoaded = false;
+let _coachBusy = false;
+
+async function loadCoach() {
+  if (_coachLoaded) return;
+  try {
+    const { messages } = await api.get('/api/coach/history');
+    const box = $('coach-messages');
+    box.innerHTML = '';
+    if (!messages.length) {
+      addCoachMessage('assistant',
+        "Hey! I'm your coach. I can see your logs, goals, and the notes you leave when you log food. " +
+        "Ask me how you're tracking, or just tell me about your goals and I'll remember.");
+    } else {
+      messages.forEach(m => addCoachMessage(m.role, m.content));
+    }
+    _coachLoaded = true;
+    scrollCoachToBottom();
+  } catch (err) {
+    showToast(err.message, 'error');
+  }
+}
+
+function addCoachMessage(role, content) {
+  const box = $('coach-messages');
+  const el = document.createElement('div');
+  el.className = `coach-msg coach-${role === 'user' ? 'user' : 'bot'}`;
+  el.textContent = content;
+  box.appendChild(el);
+  return el;
+}
+
+function scrollCoachToBottom() {
+  const box = $('coach-messages');
+  box.scrollTop = box.scrollHeight;
+}
+
+async function sendCoach(message) {
+  const text = (message || '').trim();
+  if (!text || _coachBusy) return;
+  _coachBusy = true;
+  $('coach-input').value = '';
+  addCoachMessage('user', text);
+  const thinking = addCoachMessage('bot', '…');
+  thinking.classList.add('coach-thinking');
+  scrollCoachToBottom();
+  try {
+    const { reply } = await api.post('/api/coach/chat', { message: text });
+    thinking.classList.remove('coach-thinking');
+    thinking.textContent = reply;
+  } catch (err) {
+    thinking.classList.remove('coach-thinking');
+    thinking.classList.add('coach-error');
+    thinking.textContent = err.message;
+  } finally {
+    _coachBusy = false;
+    scrollCoachToBottom();
+  }
+}
+
+$('coach-composer').addEventListener('submit', e => {
+  e.preventDefault();
+  sendCoach($('coach-input').value);
+});
+
+document.querySelectorAll('.coach-suggest').forEach(btn =>
+  btn.addEventListener('click', () => sendCoach(btn.dataset.prompt)));
 
 function prefillGoals() {
   const u = state.user || {};
@@ -953,7 +1107,7 @@ function renderGoalProgress() {
     const over = val > goal;
     return `<div class="gp-row">
       <div class="gp-head"><span class="gp-label">${label}</span>
-        <span class="gp-vals">${v} / ${Math.round(goal)}${unit}${over ? ' ⚠' : ''}</span></div>
+        <span class="gp-vals">${v} / ${Math.round(goal)}${unit}${over ? ' <span class="gp-over">over</span>' : ''}</span></div>
       <div class="gp-track"><div class="gp-fill ${cls}${over ? ' over' : ''}" style="width:${pct}%"></div></div>
     </div>`;
   }).join('');
@@ -1118,7 +1272,7 @@ async function loadReminders() {
       <div class="reminder-row${r.enabled ? '' : ' off'}" data-id="${r.id}">
         <input type="checkbox" class="reminder-toggle" ${r.enabled ? 'checked' : ''}>
         <span class="reminder-time-label">${fmtTime(r.time_local)}</span>
-        <button class="reminder-del" title="Remove">✕</button>
+        <button class="reminder-del" title="Remove">${icon('x')}</button>
       </div>`).join('');
 
     list.querySelectorAll('.reminder-row').forEach(row => {
@@ -1185,7 +1339,7 @@ async function loadQuickPicks() {
     ];
     const el = $('quick-picks');
     el.innerHTML = chips.map(({ f, star }, i) =>
-      `<button class="chip${star ? ' chip-star' : ''}" data-idx="${i}">${star ? '★ ' : ''}${esc(f.name)}</button>`
+      `<button class="chip${star ? ' chip-star' : ''}" data-idx="${i}">${star ? icon('star', 'chip-star-ic') : ''}${esc(f.name)}</button>`
     ).join('');
     el.querySelectorAll('.chip').forEach(c => c.addEventListener('click', () => {
       const food = chips[+c.dataset.idx].f;
@@ -1249,7 +1403,7 @@ function renderCfIngredients() {
       <span class="ci-name">${esc(ing.food.name)}</span>
       <input type="number" class="ci-qty" value="${Math.round(ing.quantity_g)}" min="1">
       <span class="ci-unit">g</span>
-      <button class="ci-del" title="Remove">✕</button>
+      <button class="ci-del" title="Remove">${icon('x')}</button>
     </div>`).join('');
   el.querySelectorAll('.cf-ingredient').forEach(row => {
     const i = +row.dataset.idx;
@@ -1334,7 +1488,7 @@ async function loadMyFoods() {
       <div class="cf-mine-row" data-id="${f.id}">
         <span class="cm-name">${esc(f.name)}</span>
         <span class="cm-kind">${f.source === 'recipe' ? 'recipe' : 'custom'}</span>
-        <button class="cm-del" title="Delete">🗑</button>
+        <button class="cm-del" title="Delete">${icon('x')}</button>
       </div>`).join('');
     el.querySelectorAll('.cf-mine-row').forEach(row => {
       row.querySelector('.cm-del').addEventListener('click', async () => {
@@ -1360,7 +1514,8 @@ function esc(str) {
 }
 
 function sourceIcon(source) {
-  return { manual: '✏️', voice: '🎤', photo: '📷', shared: '🤝' }[source] || '•';
+  const name = { manual: 'pencil', voice: 'mic', photo: 'camera', shared: 'users' }[source] || 'pencil';
+  return icon(name, 'src-ic');
 }
 
 // Which database the *nutrition* came from (foods.source), for transparency.
