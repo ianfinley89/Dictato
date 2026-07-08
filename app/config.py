@@ -21,3 +21,5 @@ FATSECRET_CLIENT_ID: str = os.getenv("FATSECRET_CLIENT_ID", "")
 FATSECRET_CLIENT_SECRET: str = os.getenv("FATSECRET_CLIENT_SECRET", "")
 # FatSecret license: cached results must be purged after this many hours.
 FATSECRET_TTL_HOURS: int = int(os.getenv("FATSECRET_TTL_HOURS", "24"))
+# Local speech-to-text (faster-whisper) model size: tiny/base/small/medium.
+WHISPER_MODEL: str = os.getenv("WHISPER_MODEL", "small")

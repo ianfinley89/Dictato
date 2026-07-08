@@ -6,7 +6,7 @@
   <title>Dictato</title>
   <link rel="manifest" href="/manifest.json">
   <link rel="stylesheet" href="/static/style.css">
-  <meta name="theme-color" content="#1a1a2e">
+  <meta name="theme-color" content="#06060c">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <meta name="apple-mobile-web-app-title" content="Dictato">
@@ -56,7 +56,7 @@
       <svg class="cal-ring" viewBox="0 0 120 120">
         <defs>
           <linearGradient id="ringGrad" x1="0" y1="0" x2="1" y2="1">
-            <stop offset="0%" stop-color="#7c6af7"/>
+            <stop offset="0%" stop-color="#8b7cff"/>
             <stop offset="100%" stop-color="#4cc9f0"/>
           </linearGradient>
         </defs>
@@ -110,6 +110,7 @@
       <button id="confirm-fav-star" class="fav-star" title="Save as favorite">★</button>
     </div>
     <div id="confirm-food-brand"></div>
+    <div id="confirm-source" class="confirm-source hidden"></div>
     <button id="confirm-change-btn" class="link-btn">Wrong match? Pick a different food</button>
     <div id="confirm-picker" class="food-picker hidden"></div>
     <!-- Servings input (shown when the food has a known serving size) -->
@@ -130,19 +131,18 @@
     </div>
   </div>
 
-  <!-- Multi-item voice confirm (e.g. "eggs and toast") -->
-  <div id="multi-confirm-panel" class="hidden">
-    <figure id="multi-confirm-photo" class="polaroid hidden">
+  <!-- Agent result card: what just got auto-logged, with per-entry undo/adjust -->
+  <div id="result-card" class="hidden">
+    <figure id="result-photo" class="polaroid hidden">
       <img alt="Your snapshot">
       <figcaption class="polaroid-caption">snapshot</figcaption>
     </figure>
-    <h3 id="multi-confirm-title">Voice entry</h3>
-    <div id="multi-confirm-summary" class="ai-summary hidden"></div>
-    <div id="multi-confirm-transcript" class="voice-transcript"></div>
-    <div id="multi-confirm-items"></div>
+    <h3>Logged ✓</h3>
+    <div id="result-transcript" class="voice-transcript hidden"></div>
+    <div id="result-summary" class="ai-summary"></div>
+    <div id="result-entries"></div>
     <div class="confirm-btns">
-      <button id="multi-confirm-log-btn" class="btn-primary">Log items</button>
-      <button id="multi-confirm-cancel-btn" class="btn-secondary">Cancel</button>
+      <button id="result-close" class="btn-primary">Done</button>
     </div>
   </div>
 
@@ -242,8 +242,14 @@
 <!-- Voice capture overlay -->
 <div id="voice-overlay" class="hidden">
   <div class="voice-overlay-card">
-    <div class="voice-pulse-ring"><span class="voice-pulse-mic">🎤</span></div>
-    <div class="voice-overlay-status" id="voice-overlay-status">Listening…</div>
+    <div class="voice-mic-wrap">
+      <svg class="voice-spinner" viewBox="0 0 120 120" aria-hidden="true">
+        <circle class="voice-spinner-track" cx="60" cy="60" r="54"></circle>
+        <circle class="voice-spinner-arc" cx="60" cy="60" r="54"></circle>
+      </svg>
+      <div class="voice-pulse-ring"><span class="voice-pulse-mic">🎤</span></div>
+    </div>
+    <div class="voice-overlay-status" id="voice-overlay-status">Recording…</div>
     <div class="voice-overlay-transcript" id="voice-overlay-transcript">
       <span class="voice-hint">Say something like "I had a rice cake"</span>
     </div>
@@ -251,23 +257,6 @@
       <button id="voice-overlay-stop" class="btn-primary">Done</button>
       <button id="voice-overlay-cancel" class="btn-secondary">Cancel</button>
     </div>
-  </div>
-</div>
-
-<!-- Brand not found — options -->
-<div id="brand-miss-overlay" class="hidden">
-  <div class="create-card">
-    <div class="create-head">
-      <h3>Brand not found</h3>
-      <button id="bm-close" class="icon-btn" title="Close">✕</button>
-    </div>
-    <p id="bm-msg" class="reminders-intro"></p>
-    <div class="bm-options">
-      <button id="bm-web" class="btn-primary">🔎 Look it up online</button>
-      <button id="bm-create" class="btn-secondary">✏️ Create it myself</button>
-      <button id="bm-generic" class="btn-secondary"></button>
-    </div>
-    <p id="bm-status" class="push-status"></p>
   </div>
 </div>
 

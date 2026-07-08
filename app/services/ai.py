@@ -1,72 +1,18 @@
-"""Shared Anthropic helpers for voice text-parsing and photo vision.
+"""Shared Anthropic helpers.
 
-Both paths return the same structured item shape so the frontend can reuse one
-resolve→confirm→log pipeline. Per hard rule #1, the model only identifies and
-estimates; nutrition always comes from the food DB afterwards.
+The agentic logging loop lives in app/services/agent.py; this module keeps the
+client factory and the two-pass web nutrition lookup used by the manual
+"look it up on the web" flow (/api/foods/weblookup).
 """
-import base64
 from app.config import ANTHROPIC_API_KEY
 from app.services.ai_usage import record_tokens
-from app.services.voice_parse import _UNIT_TO_G
 
 MODEL_HAIKU = "claude-haiku-4-5-20251001"
-
-PARSE_TOOL = {
-    "name": "parse_food_items",
-    "description": "Extract the distinct food/drink items and quantity estimates.",
-    "input_schema": {
-        "type": "object",
-        "properties": {
-            "summary": {
-                "type": "string",
-                "description": (
-                    "One short, friendly sentence describing what you identified and the "
-                    "portions, e.g. 'I see a California roll, about 10 pieces.' "
-                    "Do NOT mention calories or nutrition numbers."
-                ),
-            },
-            "items": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "name":         {"type": "string"},
-                        "est_quantity": {"type": "number"},
-                        "unit":         {"type": "string", "description": "g, oz, cup, slice, piece, tbsp, tsp, scoop, serving"},
-                        "confidence":   {"type": "number", "description": "0.0-1.0"},
-                    },
-                    "required": ["name", "est_quantity", "unit", "confidence"],
-                },
-            },
-        },
-        "required": ["summary", "items"],
-    },
-}
 
 
 def _client():
     import anthropic
     return anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
-
-
-async def parse_text(transcript: str, user_id: int) -> dict:
-    content = (
-        "Extract food items from this voice transcript. Give realistic quantity "
-        f"estimates.\n\nTranscript: {transcript}"
-    )
-    return await _run(content, user_id)
-
-
-async def parse_image(image_bytes: bytes, media_type: str, user_id: int) -> dict:
-    b64 = base64.b64encode(image_bytes).decode("ascii")
-    content = [
-        {"type": "image", "source": {"type": "base64", "media_type": media_type, "data": b64}},
-        {"type": "text", "text": (
-            "Identify each distinct food or drink in this meal photo and estimate "
-            "the portion of each. Be specific (e.g. 'grilled chicken breast', not 'meat')."
-        )},
-    ]
-    return await _run(content, user_id)
 
 
 _WEB_SEARCH_TOOL = {"type": "web_search_20250305", "name": "web_search", "max_uses": 3}
@@ -149,42 +95,3 @@ def _num(v) -> float:
         return 0.0
 
 
-async def _run(content, user_id: int) -> dict:
-    """Returns {"items": [...], "summary": str}."""
-    resp = await _client().messages.create(
-        model=MODEL_HAIKU,
-        max_tokens=512,
-        tools=[PARSE_TOOL],
-        tool_choice={"type": "tool", "name": PARSE_TOOL["name"]},
-        messages=[{"role": "user", "content": content}],
-    )
-    record_tokens(user_id, resp.usage.input_tokens, resp.usage.output_tokens)
-    for block in resp.content:
-        if block.type == "tool_use" and block.name == PARSE_TOOL["name"]:
-            data = block.input
-            return {
-                "items": [normalise(i) for i in data.get("items", [])],
-                "summary": (data.get("summary") or "").strip(),
-            }
-    return {"items": [], "summary": ""}
-
-
-_COUNT_UNITS = {"serving", "piece", "can", "count", "item", "unit"}
-
-
-def normalise(item: dict) -> dict:
-    """Convert a model item to {name, est_quantity_g, est_servings, unit, confidence}."""
-    unit = (item.get("unit") or "g").lower().rstrip("s")
-    qty = float(item.get("est_quantity", 100))
-    qty_g = qty * _UNIT_TO_G.get(unit, 100)
-    # When the model counts whole servings/items, keep the count so the food's
-    # known serving size can be applied at confirm time.
-    servings = qty if unit in _COUNT_UNITS else None
-    return {
-        "name": (item.get("name") or "").strip().lower(),
-        "brand": (item.get("brand") or "").strip().lower() or None,
-        "est_quantity_g": round(qty_g, 1),
-        "est_servings": servings,
-        "unit": unit,
-        "confidence": float(item.get("confidence", 0.7)),
-    }

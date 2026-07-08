@@ -5,7 +5,7 @@ from fastapi import APIRouter, Request, HTTPException, Query
 from app.auth import get_current_user_id
 from app.models import LogEntryCreate, WaterUpdate
 from app.database import get_conn
-from app.services.food_lookup import get_food_by_id
+from app.services.logging import log_entry_for_user, source_label, FoodNotFound
 
 router = APIRouter(prefix="/api/log", tags=["log"])
 
@@ -34,13 +34,13 @@ async def get_today(request: Request, tz_offset: int = 0, date: str | None = Non
     target = date if (date and _DATE_RE.match(date)) else _local_today(tz_offset)
     with get_conn() as conn:
         rows = conn.execute(
-            """SELECT le.*, f.name AS food_name, f.brand AS food_brand
+            """SELECT le.*, f.name AS food_name, f.brand AS food_brand, f.source AS food_source
                FROM log_entries le JOIN foods f ON f.id = le.food_id
                WHERE le.user_id=? AND DATE(le.eaten_at, ?) = ?
                ORDER BY le.eaten_at""",
             (uid, mod, target),
         ).fetchall()
-    return [_format_entry(r) for r in rows]
+        return [_format_entry(r, conn) for r in rows]
 
 
 @router.get("/water")
@@ -73,13 +73,13 @@ async def get_range(request: Request, start: str, end: str):
     uid = get_current_user_id(request)
     with get_conn() as conn:
         rows = conn.execute(
-            """SELECT le.*, f.name AS food_name, f.brand AS food_brand
+            """SELECT le.*, f.name AS food_name, f.brand AS food_brand, f.source AS food_source
                FROM log_entries le JOIN foods f ON f.id = le.food_id
                WHERE le.user_id=? AND DATE(le.eaten_at) BETWEEN ? AND ?
                ORDER BY le.eaten_at""",
             (uid, start, end),
         ).fetchall()
-    return [_format_entry(r) for r in rows]
+        return [_format_entry(r, conn) for r in rows]
 
 
 @router.get("/summary")
@@ -121,34 +121,14 @@ async def get_summary(request: Request, days: int = Query(7, ge=1, le=90), tz_of
 @router.post("/")
 async def create_entry(request: Request, body: LogEntryCreate):
     uid = get_current_user_id(request)
-    food = get_food_by_id(body.food_id)
-    if not food:
-        raise HTTPException(404, "Food not found")
-    # A user's recipes/custom foods are private — can't log someone else's.
-    if food["source"] in ("user", "recipe") and food.get("created_by_user_id") != uid:
-        raise HTTPException(404, "Food not found")
-
-    n = food["nutrients_per_100g"]
-    factor = body.quantity_g / 100.0
-    snapshot = {
-        "calories": round((n.get("calories") or 0) * factor, 1),
-        "protein_g": round((n.get("protein_g") or 0) * factor, 1),
-        "carbs_g": round((n.get("carbs_g") or 0) * factor, 1),
-        "fat_g": round((n.get("fat_g") or 0) * factor, 1),
-        "fiber_g": round((n.get("fiber_g") or 0) * factor, 1),
-    }
-    eaten_at = body.eaten_at or datetime.now(timezone.utc).isoformat()
-
-    with get_conn() as conn:
-        cur = conn.execute(
-            """INSERT INTO log_entries
-               (user_id, food_id, eaten_at, quantity_g, nutrients_snapshot_json, source, notes, confirmed)
-               VALUES (?,?,?,?,?,?,?,1)""",
-            (uid, body.food_id, eaten_at, body.quantity_g, json.dumps(snapshot), body.source, body.notes),
+    try:
+        entry = log_entry_for_user(
+            uid, body.food_id, body.quantity_g, body.source,
+            notes=body.notes, eaten_at=body.eaten_at,
         )
-        entry_id = cur.lastrowid
-
-    return {"id": entry_id, **snapshot}
+    except FoodNotFound:
+        raise HTTPException(404, "Food not found")
+    return entry
 
 
 @router.delete("/{entry_id}")
@@ -164,9 +144,9 @@ async def delete_entry(entry_id: int, request: Request):
     return {"ok": True}
 
 
-def _format_entry(row) -> dict:
+def _format_entry(row, conn=None) -> dict:
     snap = json.loads(row["nutrients_snapshot_json"])
-    return {
+    entry = {
         "id": row["id"],
         "food_id": row["food_id"],
         "food_name": row["food_name"],
@@ -181,3 +161,6 @@ def _format_entry(row) -> dict:
         "fat_g": snap.get("fat_g", 0),
         "fiber_g": snap.get("fiber_g", 0),
     }
+    if conn is not None and "food_source" in row.keys():
+        entry["food_source"] = source_label(conn, row["food_id"], row["food_source"])
+    return entry

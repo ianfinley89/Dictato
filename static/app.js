@@ -28,7 +28,6 @@ const state = {
   viewDate: null,     // local YYYY-MM-DD being viewed
   searchResults: [],
   pendingFood: null,
-  pendingItems: [],   // [{food, quantity_g, included}] for multi-item voice confirm
 };
 
 // ── DOM refs ─────────────────────────────────────────────────────────────────
@@ -43,7 +42,6 @@ const confirmServings = $('confirm-servings');
 const confirmServingsRow = $('confirm-servings-row');
 const confirmGramsRow = $('confirm-grams-row');
 const confirmServingEq = $('confirm-serving-eq');
-const multiConfirmPanel = $('multi-confirm-panel');
 const searchInput = $('food-search');
 const searchResults = $('search-results');
 const voiceBtn = $('voice-btn');
@@ -246,7 +244,6 @@ function openConfirm(food, defaultGrams = 100, source = 'manual', defaultServing
   $('confirm-picker').classList.add('hidden');   // reset any open picker
   applyConfirmFood(food, defaultGrams, defaultServings);
   confirmPanel.classList.remove('hidden');
-  multiConfirmPanel.classList.add('hidden');
   const lead = _servingMode ? confirmServings : confirmQty;
   lead.focus();
   lead.select();
@@ -258,6 +255,10 @@ function applyConfirmFood(food, defaultGrams = 100, defaultServings = null) {
   state.pendingFood = food;
   $('confirm-food-name').textContent = food.name;
   $('confirm-food-brand').textContent = food.brand || '';
+  const srcEl = $('confirm-source');
+  const srcLabel = foodSourceLabel(food.source);
+  srcEl.textContent = srcLabel ? `📊 Nutrition from ${srcLabel}` : '';
+  srcEl.classList.toggle('hidden', !srcLabel);
   renderFavStar();
 
   _servingMode = !!food.serving_g;
@@ -349,24 +350,61 @@ $('confirm-change-btn').addEventListener('click', () => {
   }
 });
 
-// ── Multi-item confirm panel (voice/photo with multiple foods) ────────────────
-let _multiSource = 'voice';
-
-function openMultiConfirm(resolved, label, source = 'voice', summary = '', photoUrl = '') {
-  _multiSource = source;
-  state.pendingItems = resolved.map(r => ({ ...r, included: true }));
-  $('multi-confirm-title').textContent = source === 'photo' ? 'Photo entry' : 'Voice entry';
-  setPolaroid($('multi-confirm-photo'), photoUrl);
-  setAiSummary($('multi-confirm-summary'), summary);
-  // Photo has no spoken transcript; hide the quote line when the label is a placeholder.
-  const transcriptEl = $('multi-confirm-transcript');
-  const showTranscript = label && label !== 'photo';
-  transcriptEl.textContent = showTranscript ? `"${label}"` : '';
-  transcriptEl.classList.toggle('hidden', !showTranscript);
-  renderMultiItems();
-  multiConfirmPanel.classList.remove('hidden');
+// ── Result card: what the agent just logged, with per-entry Undo/Adjust ───────
+function showResultCard(result, photoUrl = '') {
+  setPolaroid($('result-photo'), photoUrl);
+  $('result-summary').textContent = result.summary || '';
+  const t = $('result-transcript');
+  const showTranscript = !!result.transcript;
+  t.textContent = showTranscript ? `“${result.transcript}”` : '';
+  t.classList.toggle('hidden', !showTranscript);
+  renderResultEntries(result.entries || []);
+  $('result-card').classList.remove('hidden');
   confirmPanel.classList.add('hidden');
 }
+
+function renderResultEntries(entries) {
+  const wrap = $('result-entries');
+  if (!entries.length) {
+    wrap.innerHTML = '';
+    return;
+  }
+  wrap.innerHTML = entries.map(e => `
+    <div class="result-entry" data-id="${e.id}">
+      <div class="result-entry-info">
+        <div class="result-entry-name">${esc(e.food_name)}${e.food_brand ? ' · ' + esc(e.food_brand) : ''}</div>
+        <div class="result-entry-meta">${Math.round(e.quantity_g)}g · ${e.calories.toFixed(0)} cal · 📊 ${esc(e.food_source || '')}</div>
+      </div>
+      <button class="result-adjust link-btn" data-id="${e.id}" data-food="${e.food_id}" data-qty="${e.quantity_g}">Adjust</button>
+      <button class="result-undo link-btn" data-id="${e.id}">Undo</button>
+    </div>`).join('');
+
+  wrap.querySelectorAll('.result-undo').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      try {
+        await api.del(`/api/log/${btn.dataset.id}`);
+        btn.closest('.result-entry').remove();
+        await goToToday();
+      } catch (err) { showToast(err.message, 'error'); }
+    });
+  });
+
+  // Adjust = undo the entry, then reopen the classic confirm panel prefilled
+  // with the same food/quantity so the user can correct and re-log it.
+  wrap.querySelectorAll('.result-adjust').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      try {
+        const food = await api.get(`/api/foods/${btn.dataset.food}`);
+        await api.del(`/api/log/${btn.dataset.id}`);
+        await goToToday();
+        $('result-card').classList.add('hidden');
+        openConfirm(food, parseFloat(btn.dataset.qty) || 100, 'manual');
+      } catch (err) { showToast(err.message, 'error'); }
+    });
+  });
+}
+
+$('result-close').addEventListener('click', () => $('result-card').classList.add('hidden'));
 
 // Show the model's "what I saw" sentence in a banner, or hide it when empty.
 function setAiSummary(el, summary) {
@@ -427,82 +465,6 @@ function setPolaroid(figureEl, url) {
   }
 }
 
-function renderMultiItems() {
-  const container = $('multi-confirm-items');
-  container.innerHTML = state.pendingItems.map((item, i) => {
-    const n = item.food.nutrients_per_100g;
-    const f = item.quantity_g / 100;
-    return `<div class="multi-item${item.included ? '' : ' excluded'}" data-idx="${i}">
-      <div class="multi-item-header">
-        <input type="checkbox" class="mi-check" ${item.included ? 'checked' : ''}>
-        <span class="multi-item-food-name">${esc(item.food.name)}</span>
-        <button class="mi-change link-btn">change</button>
-      </div>
-      <div class="mi-picker food-picker hidden"></div>
-      <div class="multi-item-qty-row">
-        <label>g:</label>
-        <input type="number" class="mi-qty" value="${Math.round(item.quantity_g)}" min="1" max="9999">
-        <span class="multi-item-cal mi-cal">${((n.calories || 0) * f).toFixed(0)} cal</span>
-      </div>
-      <div class="multi-item-macros mi-macros">
-        P${((n.protein_g || 0) * f).toFixed(1)} C${((n.carbs_g || 0) * f).toFixed(1)} F${((n.fat_g || 0) * f).toFixed(1)}
-      </div>
-    </div>`;
-  }).join('');
-
-  container.querySelectorAll('.multi-item').forEach(el => {
-    const i = +el.dataset.idx;
-    const item = state.pendingItems[i];
-    const n = item.food.nutrients_per_100g;
-
-    el.querySelector('.mi-check').addEventListener('change', function () {
-      item.included = this.checked;
-      el.classList.toggle('excluded', !item.included);
-    });
-
-    el.querySelector('.mi-qty').addEventListener('input', function () {
-      item.quantity_g = parseFloat(this.value) || 0;
-      const f2 = item.quantity_g / 100;
-      el.querySelector('.mi-cal').textContent = `${((n.calories || 0) * f2).toFixed(0)} cal`;
-      el.querySelector('.mi-macros').textContent =
-        `P${((n.protein_g || 0) * f2).toFixed(1)} C${((n.carbs_g || 0) * f2).toFixed(1)} F${((n.fat_g || 0) * f2).toFixed(1)}`;
-    });
-
-    el.querySelector('.mi-change').addEventListener('click', () => {
-      const picker = el.querySelector('.mi-picker');
-      const show = picker.classList.contains('hidden');
-      picker.classList.toggle('hidden', !show);
-      if (show) {
-        mountFoodPicker(picker, (food) => {
-          item.food = food;   // swap the food, keep the user's grams
-          renderMultiItems();
-        });
-      }
-    });
-  });
-}
-
-$('multi-confirm-log-btn').addEventListener('click', async () => {
-  const toLog = state.pendingItems.filter(i => i.included && i.quantity_g > 0);
-  if (!toLog.length) { showToast('Nothing selected.', 'error'); return; }
-  try {
-    for (const item of toLog) {
-      await api.post('/api/log/', { food_id: item.food.id, quantity_g: item.quantity_g, source: _multiSource });
-    }
-    multiConfirmPanel.classList.add('hidden');
-    state.pendingItems = [];
-    showToast(`Logged ${toLog.length} item${toLog.length > 1 ? 's' : ''}!`, 'success');
-    await goToToday();   // new entries land on today — show it
-  } catch (err) {
-    showToast(err.message, 'error');
-  }
-});
-
-$('multi-confirm-cancel-btn').addEventListener('click', () => {
-  multiConfirmPanel.classList.add('hidden');
-  state.pendingItems = [];
-});
-
 // ── Day log ───────────────────────────────────────────────────────────────────
 async function loadDayLog() {
   renderDayNav();
@@ -535,6 +497,7 @@ function entryHtml(e) {
     <div class="log-info">
       <div class="log-name">${esc(e.food_name)}</div>
       <div class="log-meta">${e.quantity_g}g${e.food_brand ? ' · ' + esc(e.food_brand) : ''}</div>
+      ${e.food_source ? `<div class="log-src">📊 ${esc(e.food_source)}</div>` : ''}
     </div>
     <div class="log-nutrition">
       <div class="log-cal">${e.calories.toFixed(0)}</div>
@@ -668,13 +631,13 @@ async function setWater(g) {
   }
 }
 
-// ── Voice input ───────────────────────────────────────────────────────────────
-const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-let recognition = null;
-let listening = false;
+// ── Voice input (MediaRecorder → server-side Whisper → agent) ─────────────────
+let mediaRecorder = null;
+let recChunks = [];
+let recCancelled = false;
+let recTimer = null;
 
 function setListening(on) {
-  listening = on;
   voiceBtn.classList.toggle('listening', on);
 }
 
@@ -684,209 +647,118 @@ function showVoiceMsg(msg, autohideMs = 0) {
   if (autohideMs) setTimeout(() => voiceStatus.classList.add('hidden'), autohideMs);
 }
 
-function voiceErrorText(code) {
-  switch (code) {
-    case 'not-allowed':
-    case 'service-not-allowed':
-      return 'Microphone is blocked. Allow mic access for this site — note it needs HTTPS (or localhost).';
-    case 'no-speech':
-      return "Didn't catch anything. Tap the mic and speak.";
-    case 'audio-capture':
-      return 'No microphone found on this device.';
-    case 'network':
-      return 'Speech service network error. Check your connection.';
-    case 'aborted':
-      return '';  // user stopped it; no message needed
-    default:
-      return `Mic error: ${code}. Try again.`;
-  }
-}
-
 // Capture overlay refs
 const voiceOverlay = $('voice-overlay');
 const voiceOverlayStatus = $('voice-overlay-status');
 const voiceOverlayTranscript = $('voice-overlay-transcript');
 
-let finalTranscript = '';
-let lastInterim = '';
-let cancelled = false;
-let errored = false;
-
 function openVoiceOverlay() {
-  finalTranscript = '';
-  lastInterim = '';
-  cancelled = false;
-  errored = false;
-  voiceOverlayStatus.textContent = 'Listening…';
-  voiceOverlayTranscript.innerHTML = '<span class="voice-hint">Speak now — say something like "I had a rice cake"</span>';
+  voiceOverlayStatus.textContent = 'Recording…';
+  voiceOverlayTranscript.innerHTML = '<span class="voice-hint">Speak now — tap <b>Done</b> when you finish</span>';
   voiceOverlay.classList.remove('hidden');
+  const t0 = Date.now();
+  recTimer = setInterval(() => {
+    const s = Math.floor((Date.now() - t0) / 1000);
+    voiceOverlayStatus.textContent = `Recording… 0:${String(s % 60).padStart(2, '0')}`;
+  }, 1000);
 }
 
 function closeVoiceOverlay() {
+  clearInterval(recTimer);
   voiceOverlay.classList.add('hidden');
 }
 
-if (!SpeechRecognition) {
-  voiceBtn.style.opacity = '0.6';
-  voiceBtn.title = 'Voice not supported in this browser';
-  voiceBtn.addEventListener('click', () =>
-    showVoiceMsg("Voice input isn't supported in this browser. Try Chrome, or just type the food.", 6000));
-} else {
-  recognition = new SpeechRecognition();
-  recognition.lang = 'en-US';
-  recognition.interimResults = true;   // drive the live transcript in the overlay
-  recognition.maxAlternatives = 1;
-
-  recognition.onstart = () => setListening(true);
-  recognition.onaudiostart = () => { voiceOverlayStatus.textContent = 'Listening…'; };
-
-  recognition.onresult = e => {
-    let interim = '';
-    for (let i = e.resultIndex; i < e.results.length; i++) {
-      const t = e.results[i][0].transcript;
-      if (e.results[i].isFinal) finalTranscript += t;
-      else interim += t;
-    }
-    lastInterim = interim;
-    const shown = (finalTranscript + interim).trim();
-    if (shown) {
-      voiceOverlayTranscript.innerHTML = esc(finalTranscript) + `<span class="interim">${esc(interim)}</span>`;
-    }
-  };
-
-  recognition.onerror = e => {
-    setListening(false);
-    if (e.error === 'aborted') return;   // cancel/stop path; onend cleans up
-    errored = true;
-    closeVoiceOverlay();
-    const msg = voiceErrorText(e.error);
-    if (msg) showVoiceMsg(msg, 6000);
-  };
-
-  recognition.onend = () => {
-    setListening(false);
-    if (cancelled || errored) { closeVoiceOverlay(); return; }
-    const transcript = (finalTranscript || lastInterim).trim();
-    closeVoiceOverlay();
-    if (!transcript) {
-      showVoiceMsg("Didn't catch anything — tap 🎤 to try again.", 5000);
-      return;
-    }
-    // Show what was heard, then hand off to parse + lookup.
-    showVoiceMsg(`Heard: "${transcript}"`);
-    handleVoiceTranscript(transcript);
-  };
-
-  voiceBtn.addEventListener('click', startVoiceCapture);
-
-  $('voice-overlay-stop').addEventListener('click', () => {
-    recognition.stop();   // finalize; onend processes the transcript
-  });
-
-  $('voice-overlay-cancel').addEventListener('click', () => {
-    cancelled = true;
-    recognition.abort();
-    closeVoiceOverlay();
-  });
+// Chrome/Android record webm/opus; iOS Safari records mp4/AAC. Whisper on the
+// server decodes both, so we just pick whatever this browser supports.
+function pickAudioMime() {
+  const candidates = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4'];
+  return candidates.find(m => MediaRecorder.isTypeSupported(m)) || '';
 }
 
-function startVoiceCapture() {
-  if (listening) { recognition.stop(); return; }
-
-  // Web Speech API requires a secure context: https:// or localhost.
+async function startVoiceCapture() {
+  if (mediaRecorder && mediaRecorder.state === 'recording') return;
   if (!window.isSecureContext) {
     showVoiceMsg('Mic needs a secure connection. Use http://localhost, or an https:// URL when on your phone.', 8000);
     return;
   }
+  if (!navigator.mediaDevices || !window.MediaRecorder) {
+    showVoiceMsg("Audio recording isn't supported in this browser.", 6000);
+    return;
+  }
+
+  let stream;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  } catch {
+    showVoiceMsg('Microphone is blocked. Allow mic access for this site in your browser settings.', 8000);
+    return;
+  }
 
   voiceStatus.classList.add('hidden');
-  openVoiceOverlay();
+  recChunks = [];
+  recCancelled = false;
+  const mime = pickAudioMime();
   try {
-    recognition.start();
-    setListening(true);
-  } catch (err) {
+    mediaRecorder = mime ? new MediaRecorder(stream, { mimeType: mime }) : new MediaRecorder(stream);
+  } catch {
+    mediaRecorder = new MediaRecorder(stream);
+  }
+
+  mediaRecorder.ondataavailable = (e) => { if (e.data && e.data.size) recChunks.push(e.data); };
+  mediaRecorder.onstop = () => {
+    stream.getTracks().forEach(t => t.stop());
     setListening(false);
     closeVoiceOverlay();
-    showVoiceMsg(`Could not start mic: ${err.message}`, 6000);
-  }
-}
-
-async function handleVoiceTranscript(raw) {
-  voiceStatus.textContent = 'Parsing…';
-  voiceStatus.classList.remove('hidden');
-
-  let parsed;
-  try {
-    parsed = await api.post('/api/voice/parse', { transcript: raw });
-  } catch (err) {
-    voiceStatus.textContent = `Parse failed: ${err.message}`;
-    return;
-  }
-
-  const items = parsed.items || [];
-  if (!items.length) {
-    voiceStatus.textContent = `Couldn't understand "${raw}". Try searching manually.`;
-    return;
-  }
-  voiceStatus.textContent = `Found ${items.length} item${items.length > 1 ? 's' : ''}. Looking up…`;
-  await resolveAndConfirm(items, raw, 'voice', voiceStatus, parsed.summary);
-}
-
-// Resolve parsed items against the food DB, then open the right confirm panel.
-// Shared by the voice and photo paths. `statusEl` shows progress/no-match text.
-// `summary` is the model's "what I saw" sentence (empty for local parses).
-function brandMatches(food, brand) {
-  return `${food.name} ${food.brand || ''}`.toLowerCase().includes(brand.toLowerCase());
-}
-
-async function resolveAndConfirm(items, label, source, statusEl, summary = '', photoUrl = '') {
-  // Single named-brand item: never auto-pick a *different* brand. If the brand
-  // isn't found, offer options (web lookup / create / closest generic).
-  if (items.length === 1 && items[0].brand) {
-    const item = items[0];
-    let results = [];
-    try {
-      results = await api.get(`/api/foods/search?q=${encodeURIComponent(item.name)}&brand=${encodeURIComponent(item.brand)}`);
-    } catch { /* */ }
-    const match = results.find(r => brandMatches(r, item.brand));
-    statusEl.classList.add('hidden');
-    if (match) {
-      const s = item.est_servings;
-      openConfirm(match, (s != null && match.serving_g) ? s * match.serving_g : item.est_quantity_g, source, s, summary, photoUrl);
-    } else {
-      openBrandMiss(item, results[0] || null, source);
+    if (recCancelled) return;
+    const blob = new Blob(recChunks, { type: mediaRecorder.mimeType || 'audio/webm' });
+    if (blob.size < 1000) {
+      showVoiceMsg("Didn't record anything — tap 🎤 and try again.", 5000);
+      return;
     }
+    submitAgentLog({ audio: blob });
+  };
+
+  openVoiceOverlay();
+  mediaRecorder.start(250);   // flush chunks as we go
+  setListening(true);
+}
+
+voiceBtn.addEventListener('click', startVoiceCapture);
+
+$('voice-overlay-stop').addEventListener('click', () => {
+  if (mediaRecorder && mediaRecorder.state !== 'inactive') mediaRecorder.stop();
+});
+
+$('voice-overlay-cancel').addEventListener('click', () => {
+  recCancelled = true;
+  if (mediaRecorder && mediaRecorder.state !== 'inactive') mediaRecorder.stop();
+  else closeVoiceOverlay();
+});
+
+// ── Agent logging (voice/photo → auto-logged entries + result card) ──────────
+async function submitAgentLog({ audio = null, image = null, photoUrl = '' }) {
+  showVoiceMsg(audio ? 'Transcribing & logging…' : 'Analyzing & logging…');
+
+  const form = new FormData();
+  if (audio) form.append('audio', audio, 'voice-note');
+  if (image) form.append('image', image, 'meal.jpg');
+
+  let result;
+  try {
+    const r = await fetch('/api/agent/log', { method: 'POST', credentials: 'same-origin', body: form });
+    if (!r.ok) {
+      const err = await r.json().catch(() => ({ detail: r.statusText }));
+      throw new Error(err.detail || 'Logging failed');
+    }
+    result = await r.json();
+  } catch (err) {
+    showVoiceMsg(err.message, 8000);
     return;
   }
 
-  const resolved = [];
-  for (const item of items) {
-    try {
-      const results = await api.get(`/api/foods/search?q=${encodeURIComponent(item.name)}`);
-      if (results.length) {
-        const food = results[0];
-        const servings = item.est_servings;
-        // Prefer the food's real serving size when the quantity was a count.
-        const quantity_g = (servings != null && food.serving_g)
-          ? servings * food.serving_g
-          : item.est_quantity_g;
-        resolved.push({ food, quantity_g, servings });
-      }
-    } catch { /* skip item if its search fails */ }
-  }
-
-  if (!resolved.length) {
-    statusEl.textContent = `No foods found for "${label}". Try searching manually.`;
-    statusEl.classList.remove('hidden');
-    return;
-  }
-
-  statusEl.classList.add('hidden');
-  if (resolved.length === 1) {
-    openConfirm(resolved[0].food, resolved[0].quantity_g, source, resolved[0].servings, summary, photoUrl);
-  } else {
-    openMultiConfirm(resolved, label, source, summary, photoUrl);
-  }
+  voiceStatus.classList.add('hidden');
+  await goToToday();   // entries are already saved — refresh the day view
+  showResultCard(result, photoUrl);
 }
 
 // ── Photo input ───────────────────────────────────────────────────────────────
@@ -909,22 +781,7 @@ photoInput.addEventListener('change', async () => {
     if (_currentPhotoUrl) URL.revokeObjectURL(_currentPhotoUrl);
     _currentPhotoUrl = URL.createObjectURL(blob);
 
-    voiceStatus.textContent = 'Analyzing photo…';
-    const form = new FormData();
-    form.append('image', blob, 'meal.jpg');
-    const r = await fetch('/api/photo/parse', { method: 'POST', credentials: 'same-origin', body: form });
-    if (!r.ok) {
-      const err = await r.json().catch(() => ({ detail: r.statusText }));
-      throw new Error(err.detail || 'Photo analysis failed');
-    }
-    const parsed = await r.json();
-    const items = parsed.items || [];
-    if (!items.length) {
-      voiceStatus.textContent = 'No food recognized. Try another photo or search manually.';
-      return;
-    }
-    voiceStatus.textContent = `Found ${items.length} item${items.length > 1 ? 's' : ''}. Looking up…`;
-    await resolveAndConfirm(items, 'photo', 'photo', voiceStatus, parsed.summary, _currentPhotoUrl);
+    await submitAgentLog({ image: blob, photoUrl: _currentPhotoUrl });
   } catch (err) {
     voiceStatus.textContent = err.message;
     voiceStatus.classList.remove('hidden');
@@ -1490,79 +1347,8 @@ async function loadMyFoods() {
   }
 }
 
-// ── Brand-not-found options (web lookup / create / generic) ───────────────────
-let _bmItem = null, _bmSource = 'voice';
-const _capitalize = s => s ? s.charAt(0).toUpperCase() + s.slice(1) : s;
-
-function openBrandMiss(item, generic, source) {
-  _bmItem = item;
-  _bmSource = source;
-  $('bm-msg').textContent =
-    `We don't have "${_capitalize(item.brand)} ${item.name}" in the food database. How do you want to log it?`;
-  const g = $('bm-generic');
-  if (generic) {
-    g.textContent = `Use closest match: ${generic.name}`;
-    g.classList.remove('hidden');
-    g._food = generic;
-  } else {
-    g.classList.add('hidden');
-  }
-  $('bm-status').textContent = '';
-  $('brand-miss-overlay').classList.remove('hidden');
-}
-
-$('bm-close').addEventListener('click', () => $('brand-miss-overlay').classList.add('hidden'));
-
-$('bm-generic').addEventListener('click', function () {
-  const f = this._food;
-  if (!f) return;
-  $('brand-miss-overlay').classList.add('hidden');
-  const s = _bmItem.est_servings;
-  openConfirm(f, (s != null && f.serving_g) ? s * f.serving_g : _bmItem.est_quantity_g, _bmSource, s);
-});
-
-$('bm-create').addEventListener('click', () => {
-  $('brand-miss-overlay').classList.add('hidden');
-  openCreatePrefill(`${_capitalize(_bmItem.brand)} ${_bmItem.name}`, null);
-});
-
-$('bm-web').addEventListener('click', async () => {
-  const st = $('bm-status');
-  st.textContent = 'Searching the web…';
-  st.className = 'push-status';
-  try {
-    const draft = await api.post('/api/foods/weblookup', { name: _bmItem.name, brand: _bmItem.brand });
-    if (!draft.found) {
-      st.textContent = "Couldn't find published nutrition online. Try creating it manually.";
-      st.className = 'push-status err';
-      return;
-    }
-    $('brand-miss-overlay').classList.add('hidden');
-    openCreatePrefill(`${_capitalize(_bmItem.brand)} ${_bmItem.name}`, draft);
-  } catch (err) {
-    st.textContent = err.message;
-    st.className = 'push-status err';
-  }
-});
-
-// Open the create modal in manual-macros mode, optionally pre-filled from a web draft.
-function openCreatePrefill(name, draft) {
-  openCreate(name);
-  setCfMode('manual');
-  const note = $('cf-web-note');
-  if (draft) {
-    $('cf-manual-label').value = draft.serving || 'serving';
-    $('cf-cal').value = Math.round(draft.calories) || '';
-    $('cf-protein').value = Math.round(draft.protein_g) || '';
-    $('cf-carbs').value = Math.round(draft.carbs_g) || '';
-    $('cf-fat').value = Math.round(draft.fat_g) || '';
-    note.innerHTML = '⚠️ Pulled from the web — please double-check before saving.' +
-      (draft.source_url ? ` <a href="${esc(draft.source_url)}" target="_blank" rel="noopener">source</a>` : '');
-    note.classList.remove('hidden');
-  } else {
-    note.classList.add('hidden');
-  }
-}
+// (The old brand-miss overlay is gone — the agent now resolves brands itself,
+// searching the web and creating the food when the database misses.)
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 function esc(str) {
@@ -1575,6 +1361,17 @@ function esc(str) {
 
 function sourceIcon(source) {
   return { manual: '✏️', voice: '🎤', photo: '📷', shared: '🤝' }[source] || '•';
+}
+
+// Which database the *nutrition* came from (foods.source), for transparency.
+const FOOD_SOURCE_LABELS = {
+  usda: 'USDA', off: 'Open Food Facts', fatsecret: 'FatSecret',
+  user: 'your custom food', recipe: 'your recipe', manual: 'manual entry',
+  web: 'the web (published)', estimate: 'AI estimate',
+};
+function foodSourceLabel(source) {
+  if (!source) return '';
+  return FOOD_SOURCE_LABELS[source] || source;
 }
 
 // ── Service worker registration ───────────────────────────────────────────────

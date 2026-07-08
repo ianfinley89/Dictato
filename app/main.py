@@ -5,7 +5,7 @@ from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from app.database import init_db
-from app.routers import auth, foods, log, voice, photo, push, reminders, recipes
+from app.routers import agent, auth, foods, log, push, reminders, recipes
 from app.services.scheduler import reminder_loop
 
 
@@ -14,6 +14,9 @@ async def lifespan(app: FastAPI):
     os.makedirs("data", exist_ok=True)
     os.makedirs("uploads", exist_ok=True)
     init_db()
+    if os.getenv("WHISPER_WARMUP", "true").lower() == "true":
+        from app.services import stt
+        stt.warm_up()   # load the model now so the first voice log isn't slow
     task = asyncio.create_task(reminder_loop())   # fire meal reminders on schedule
     try:
         yield
@@ -23,11 +26,10 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Dictato", lifespan=lifespan)
 
+app.include_router(agent.router)
 app.include_router(auth.router)
 app.include_router(foods.router)
 app.include_router(log.router)
-app.include_router(voice.router)
-app.include_router(photo.router)
 app.include_router(push.router)
 app.include_router(reminders.router)
 app.include_router(recipes.router)

@@ -114,44 +114,5 @@ def test_parse_strips_filler_and_punctuation():
     assert items[0]["est_quantity_g"] == pytest.approx(200.0)  # 2 x count default
 
 
-# ── Voice endpoint tests ───────────────────────────────────────────────────────
-
-REG = {"email": "voice@example.com", "password": "password123", "display_name": "V"}
-
-
-def test_parse_endpoint_requires_auth(client):
-    r = client.post("/api/voice/parse", json={"transcript": "an apple"})
-    assert r.status_code == 401
-
-
-def test_parse_endpoint_local_result(client):
-    client.post("/api/auth/register", json=REG)
-    r = client.post("/api/voice/parse", json={"transcript": "100g oats"})
-    assert r.status_code == 200
-    data = r.json()
-    assert data["source"] == "local"
-    assert len(data["items"]) == 1
-    assert data["items"][0]["est_quantity_g"] == pytest.approx(100.0)
-
-
-def test_parse_endpoint_empty_transcript(client):
-    client.post("/api/auth/register", json=REG)
-    r = client.post("/api/voice/parse", json={"transcript": "   "})
-    assert r.status_code == 400
-
-
-def test_parse_endpoint_rate_limit(client, monkeypatch):
-    monkeypatch.setenv("AI_DAILY_LIMIT", "0")
-    client.post("/api/auth/register", json=REG)
-    # A low-confidence parse triggers the AI path; with limit=0 it should 429
-    r = client.post("/api/voice/parse", json={"transcript": "oatmeal"})
-    # Either 429 (AI tried and hit limit) or 200 with source=local (no API key in test)
-    assert r.status_code in (200, 429)
-
-
-def test_usage_endpoint(client):
-    client.post("/api/auth/register", json=REG)
-    r = client.get("/api/voice/usage")
-    assert r.status_code == 200
-    assert "vision_calls" in r.json()
-    assert "daily_limit" in r.json()
+# Endpoint tests for voice/photo logging live in test_agent.py — the old
+# /api/voice/parse and /api/photo/parse routes were replaced by /api/agent/log.

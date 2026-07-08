@@ -4,8 +4,8 @@
   "description": "Fast calorie and macro tracker",
   "start_url": "/",
   "display": "standalone",
-  "background_color": "#0f0f17",
-  "theme_color": "#1a1a2e",
+  "background_color": "#06060c",
+  "theme_color": "#06060c",
   "icons": [
     {
       "src": "/static/icon-192.png",

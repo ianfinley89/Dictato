@@ -109,6 +109,6 @@ def _can_access(food_id: int, uid: int) -> bool:
     food = get_food_by_id(food_id)
     if not food:
         return False
-    if food["source"] in ("user", "recipe"):
+    if food["source"] in ("user", "recipe", "estimate"):
         return food.get("created_by_user_id") == uid
     return True

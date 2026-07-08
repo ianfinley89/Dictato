@@ -5,8 +5,8 @@ Fast calorie and macro tracker — voice, photo, or manual entry. Self-hosted PW
 ## Quick start
 
 ```bash
-# 1. Install dependencies
-pip install -r requirements.txt
+# 1. Install dependencies (uv manages the venv from pyproject.toml)
+uv sync
 
 # 2. Configure environment
 copy .env.example .env      # Windows
@@ -14,8 +14,11 @@ copy .env.example .env      # Windows
 # Then edit .env with your API keys and a random SECRET_KEY
 
 # 3. Run
-uvicorn app.main:app --reload
+uv run uvicorn app.main:app --reload
 ```
+
+The first run downloads the local Whisper speech-to-text model (~500MB for
+`small`) — voice logging is transcribed on your own machine, no cloud STT.
 
 Open http://localhost:8000 — register an account and start logging.
 
@@ -24,11 +27,13 @@ Open http://localhost:8000 — register an account and start logging.
 | Variable | Description |
 |---|---|
 | `USDA_FOOD_DATA_API_KEY` | Free key from api.data.gov |
-| `ANTHROPIC_API_KEY` | For photo entry (Phase 3) |
+| `ANTHROPIC_API_KEY` | For the voice/photo logging agent |
 | `SECRET_KEY` | Long random string for session signing |
 | `DATABASE_PATH` | SQLite file path (default: `data/dictato.db`) |
-| `AI_DAILY_LIMIT` | Max AI calls per user per day (default: 20) |
+| `AI_DAILY_LIMIT` | Max AI agent sessions per user per day (default: 20) |
 | `SECURE_COOKIES` | Set `true` when behind HTTPS |
+| `WHISPER_MODEL` | Local STT model size: tiny/base/small/medium (default: small) |
+| `WHISPER_WARMUP` | Load the STT model at startup (default: true) |
 
 ## Run tests
 
@@ -50,9 +55,8 @@ pytest tests/ -v
 | POST | `/api/log/` | Log an entry |
 | DELETE | `/api/log/{id}` | Delete an entry |
 | GET | `/api/log/summary?days=&tz_offset=` | Per-day calorie/macro totals (1–90 days) |
-| POST | `/api/voice/parse` | Parse a spoken transcript into items |
-| GET | `/api/voice/usage` | Today's AI usage + daily limit |
-| POST | `/api/photo/parse` | Parse a meal photo into items (multipart `image`) |
+| POST | `/api/agent/log` | Voice/photo/text logging agent (multipart `audio`, `image`, or `text`) — transcribes, grounds each item in the food DB, and logs it |
+| GET | `/api/agent/usage` | Today's AI usage + daily limit |
 | PUT | `/api/auth/goals` | Set calorie + macro goals |
 | GET | `/api/push/vapid-key` | Public VAPID key for the browser |
 | POST | `/api/push/subscribe` · `/unsubscribe` · `/test` | Manage/ test web-push subscriptions |
@@ -94,11 +98,14 @@ Food Facts and before the AI web lookup.
 See [BUILD_PLAN.md](BUILD_PLAN.md).
 
 - **Phase 1** ✅ Manual tracking
-- **Phase 2** ✅ Voice entry (local parse + Haiku fallback)
+- **Phase 2** ✅ Voice entry (local Whisper STT)
 - **Phase 3** ✅ Photo entry (Haiku vision)
 - **Phase 4** ✅ Dashboard / weekly charts + goals
 - **Phase 5** ✅ Push notifications + meal reminders
 - **Phase 8** ✅ Recipes, custom foods & favorites (user-defined foods)
+- **Phase 9** ✅ Agentic logging: one tool loop grounds each item in the food DB
+  (cache → USDA → OFF → FatSecret → web), decomposes homemade meals, auto-logs
+  with per-entry Undo/Adjust, and labels every entry's data source
 - **Phase 6** Friend sharing
 - **Phase 7** Micronutrient depth
 

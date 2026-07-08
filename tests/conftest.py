@@ -2,6 +2,9 @@ import os
 import pytest
 from fastapi.testclient import TestClient
 
+# Never load the Whisper model (8s + big download) inside the test suite.
+os.environ["WHISPER_WARMUP"] = "false"
+
 
 @pytest.fixture(autouse=True)
 def isolated_db(tmp_path, monkeypatch):

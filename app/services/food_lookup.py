@@ -27,7 +27,7 @@ def _serving_grams(size, unit) -> Optional[float]:
     return round(float(size) * factor, 1) if factor else None
 
 
-_USER_SOURCES = ("user", "recipe")
+_USER_SOURCES = ("user", "recipe", "estimate")
 
 
 def _cache_all(items: list[dict]) -> list[dict]:
@@ -78,7 +78,7 @@ def _search_local(query: str, user_id: int, limit: int) -> list[dict]:
         rows = conn.execute(
             """SELECT * FROM foods
                WHERE name LIKE ?
-                 AND (source NOT IN ('user', 'recipe') OR created_by_user_id = ?)
+                 AND (source NOT IN ('user', 'recipe', 'estimate') OR created_by_user_id = ?)
                  AND (expires_at IS NULL OR datetime(expires_at) > datetime('now'))  -- skip expired licensed cache
                ORDER BY
                  CASE WHEN created_by_user_id = ? THEN 0 ELSE 1 END,   -- your foods first
