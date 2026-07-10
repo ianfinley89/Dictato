@@ -639,3 +639,37 @@ def test_export_dataset_merges_chain_and_marks_undone(client, monkeypatch):
     assert len(ex["inputs"]) == 2                      # original + follow-up
     assert ex["inputs"][1]["text"] == "make it five"
     assert ex["items"][0]["kept"] is False             # undone after export snapshot
+
+
+def test_revision_blocks_duplicate_relog(client, monkeypatch):
+    """In revision mode, log_food on an already-logged food is rejected with a
+    pointer to update_entry — the model self-corrects instead of duplicating."""
+    from app.routers import agent as agent_router
+    monkeypatch.setattr(agent_router, "ANTHROPIC_API_KEY", "test-key")
+    uid = _register(client)
+    _seed_food()
+    _log_once(uid, 1)
+    r1 = client.post("/api/agent/log", data={"text": "I had two rice cakes"})
+    cap_id = r1.json()["capture_id"]
+    entry_id = r1.json()["entries"][0]["id"]
+
+    # The scripted model tries to re-log food 1 (the duplicate), gets the guard
+    # error back, then correctly updates instead.
+    _script_llm(monkeypatch, [
+        _tool("log_food", {"food_id": 1, "servings": 2}, "t1"),
+        _tool("update_entry", {"entry_id": entry_id, "quantity_g": 27}, "t2"),
+        _text("Confirmed from the photo — adjusted to three cakes."),
+    ])
+    r2 = client.post("/api/agent/log",
+                     files={"image": ("meal.png", io.BytesIO(_PNG), "image/png")},
+                     data={"revise_capture_id": str(cap_id)})
+    assert r2.status_code == 200
+    d = r2.json()
+    assert len(d["entries"]) == 1                      # no duplicate
+    assert d["entries"][0]["quantity_g"] == pytest.approx(27.0)
+    # photo follow-up keeps the original words visible
+    assert d["transcript"] == "I had two rice cakes"
+
+    with get_conn() as conn:
+        n = conn.execute("SELECT COUNT(*) c FROM log_entries WHERE user_id=?", (uid,)).fetchone()["c"]
+    assert n == 2   # the _log_once seed + the capture's entry — no third (duplicate) row

@@ -163,7 +163,11 @@ async def agent_log(
         capture_id = _record_capture(uid, input_type, transcript, result["summary"], entries,
                                      fast_path=False, annotation=result.get("annotation"),
                                      photo_path=photo_path, parent_capture_id=revise_capture_id)
-        return {"capture_id": capture_id, "transcript": transcript, "summary": result["summary"],
+        # A photo follow-up has no words of its own — keep showing the original
+        # transcript so the context reads as appended, not replaced.
+        return {"capture_id": capture_id,
+                "transcript": transcript or revision.get("transcript"),
+                "summary": result["summary"],
                 "entries": entries, "annotation": result.get("annotation") or {},
                 "fast_path": False, "revised": True}
 

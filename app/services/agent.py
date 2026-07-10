@@ -129,14 +129,17 @@ _REMOVE_ENTRY_TOOL = {
 
 _REVISION_SYSTEM = """
 
-REVISION MODE: the user already logged the meal below and is now adding more context \
-(another photo, or more words about it). Reconcile the existing entries with what you \
-now know: update_entry to fix quantities, remove_entry to drop items that were wrong, \
-and the normal search/log tools to add items that were missing. Do NOT re-log items \
-that are already correct. If the new context doesn't clearly relate to the logged \
-meal, change NOTHING and say so in one sentence (the user can follow up again). \
-If the label or tags improved, call annotate_capture again. Finish with one short \
-sentence about what changed (or that it was already right) — no questions, no lists.
+REVISION MODE: the user already logged the meal below and is now ADDING context \
+(another photo, or more words). This is additive — reconcile, never re-derive from \
+scratch. Only change an entry when the new context gives CLEAR evidence it is wrong: \
+a different food, more or fewer items, or a readable label that contradicts it. If \
+the new context simply matches what's logged, change NOTHING and confirm it checks \
+out. The user's original words stay authoritative for counts and portions unless the \
+new context plainly contradicts them. Use update_entry to fix quantities, \
+remove_entry to drop wrong items, and the normal search/log tools ONLY for items not \
+logged yet — never re-log an existing item. If the label or tags improved, call \
+annotate_capture again. Finish with one short sentence about what changed (or that \
+it was confirmed) — no questions, no lists.
 
 Already logged:
 {entries}
@@ -355,7 +358,8 @@ def _tool_remove_entry(user_id: int, inp: dict) -> dict:
 
 
 async def _execute_tool(name: str, inp: dict, user_id: int, method: str,
-                        note: str | None, logged: list, annotation: dict) -> dict:
+                        note: str | None, logged: list, annotation: dict,
+                        existing_food_ids: dict | None = None) -> dict:
     if name == "search_food_db":
         query = (inp.get("query") or "").strip()
         if not query:
@@ -365,6 +369,12 @@ async def _execute_tool(name: str, inp: dict, user_id: int, method: str,
     if name == "create_food":
         return _tool_create_food(user_id, inp)
     if name == "log_food":
+        # Revision guard: the same food again means adjust, not duplicate.
+        fid = inp.get("food_id")
+        if existing_food_ids and fid in existing_food_ids:
+            return {"error": f"food_id {fid} is already logged as entry "
+                             f"{existing_food_ids[fid]} — use update_entry with the "
+                             f"new TOTAL grams instead of logging it again"}
         return _tool_log_food(user_id, inp, method, note, logged)
     if name == "annotate_capture":
         return _tool_annotate(user_id, inp, annotation)
@@ -408,6 +418,7 @@ async def run_agent(user_id: int, *, text: str | None = None,
     system = (_SYSTEM + f"\n\nUser's local time: {local_now.strftime('%A %H:%M')}."
               + _user_context(user_id))
     tools = [_SEARCH_TOOL, _CREATE_TOOL, _LOG_TOOL, _ANNOTATE_TOOL, _WEB_SEARCH_TOOL]
+    existing_food_ids = None
     if revision:
         prior = [{"entry_id": e["id"], "name": e["food_name"],
                   "quantity_g": e["quantity_g"], "calories": e["calories"]}
@@ -416,6 +427,7 @@ async def run_agent(user_id: int, *, text: str | None = None,
             entries=json.dumps(prior),
             transcript=json.dumps(revision.get("transcript") or "(photo, no words)"))
         tools = tools + [_UPDATE_ENTRY_TOOL, _REMOVE_ENTRY_TOOL]
+        existing_food_ids = {e["food_id"]: e["id"] for e in revision.get("entries", [])}
     messages = [user_msg]
     logged: list[dict] = []
     annotation: dict = {}
@@ -444,7 +456,8 @@ async def run_agent(user_id: int, *, text: str | None = None,
         messages.append(resp.assistant_message())
         results = []
         for tc in resp.tool_calls:
-            out = await _execute_tool(tc.name, tc.input, user_id, method, note, logged, annotation)
+            out = await _execute_tool(tc.name, tc.input, user_id, method, note,
+                                      logged, annotation, existing_food_ids)
             results.append({"id": tc.id, "name": tc.name, "content": json.dumps(out)})
         if not results:
             break
