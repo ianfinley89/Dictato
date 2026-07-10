@@ -52,6 +52,7 @@
       <button class="topnav-btn" data-pane="log">Log</button>
       <button class="topnav-btn" data-pane="coach">Coach</button>
       <button class="topnav-btn" data-pane="settings">Settings</button>
+      <button class="topnav-btn hidden" id="admin-nav-btn" data-pane="admin">Admin</button>
     </div>
   </div>
 </nav>
@@ -126,10 +127,22 @@
     <h3><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg> Logged</h3>
     <div id="result-transcript" class="voice-transcript hidden"></div>
     <div id="result-summary" class="ai-summary"></div>
+    <div id="result-annotation" class="hidden"></div>
     <div id="result-entries"></div>
+    <div id="result-followup" class="result-followup hidden">
+      <button id="followup-voice" class="btn-secondary btn-with-icon">
+        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="22"/></svg>
+        Say more
+      </button>
+      <button id="followup-photo" class="btn-secondary btn-with-icon">
+        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>
+        Add photo
+      </button>
+    </div>
     <div class="confirm-btns">
       <button id="result-close" class="btn-primary">Done</button>
     </div>
+    <button id="result-report" class="link-btn result-report">Something wrong? Report it</button>
   </div>
 
 </div>
@@ -239,6 +252,14 @@
     </p>
   </section>
 
+  <!-- Support -->
+  <section class="dash-section">
+    <p class="section-heading">Support</p>
+    <p class="reminders-intro">Hit a bug, a wrong food match, or something confusing? Tell us — reports go straight to the maintainer with context attached.</p>
+    <p class="reminders-intro">Heads up: meal photos and voice transcripts are stored with your log to keep improving Dictato. Deleting your account permanently deletes all of it.</p>
+    <button id="report-issue-btn" class="btn-secondary">Report an issue</button>
+  </section>
+
   <!-- Account -->
   <section class="dash-section">
     <p class="section-heading">Account</p>
@@ -275,6 +296,74 @@
       <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
     </button>
   </form>
+</div>
+
+<!-- ═══════════════════ ADMIN PANE (maintainer only) ═══════════════════ -->
+<div id="admin-screen" class="screen sub-screen hidden">
+
+  <section class="dash-section">
+    <p class="section-heading">Last 14 days</p>
+    <div id="admin-tiles" class="stat-grid"></div>
+  </section>
+
+  <section class="dash-section">
+    <p class="section-heading">Captures per day</p>
+    <div id="admin-chart" class="bar-chart"></div>
+    <p id="admin-chart-caption" class="chart-caption"></p>
+  </section>
+
+  <section class="dash-section">
+    <p class="section-heading">Where logged nutrition came from</p>
+    <div id="admin-sources"></div>
+  </section>
+
+  <section class="dash-section">
+    <p class="section-heading">Per user</p>
+    <div class="admin-table-wrap">
+      <table class="admin-table" id="admin-users"></table>
+    </div>
+  </section>
+
+  <section class="dash-section">
+    <p class="section-heading">Failed captures (nothing logged)</p>
+    <p class="reminders-intro">Read these to find parser gaps, transcription misses, and prompt problems.</p>
+    <div id="admin-failures"></div>
+  </section>
+
+  <section class="dash-section">
+    <p class="section-heading">Issue reports</p>
+    <div id="admin-issues"></div>
+  </section>
+
+  <section class="dash-section">
+    <p class="section-heading">Recent model calls</p>
+    <p class="reminders-intro">Every LLM request with latency, tokens, and the response — tap one to inspect.</p>
+    <div id="admin-traces"></div>
+  </section>
+
+  <section class="dash-section">
+    <p class="section-heading">Server errors</p>
+    <div id="admin-errors"></div>
+  </section>
+
+</div>
+
+<!-- Report an issue — modal, reachable from the result card and Settings -->
+<div id="issue-overlay" class="hidden">
+  <div class="create-card">
+    <div class="create-head">
+      <h3>Report an issue</h3>
+      <button id="issue-close" class="icon-btn" title="Close">
+        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+      </button>
+    </div>
+    <p class="reminders-intro">What went wrong? If this is about something you just logged, the details are attached automatically.</p>
+    <textarea id="issue-text" rows="4" maxlength="2000" placeholder="e.g. I said 3 tacos but it logged 300g of taco shells…"></textarea>
+    <div class="confirm-btns">
+      <button id="issue-send" class="btn-primary">Send report</button>
+      <button id="issue-cancel" class="btn-secondary">Cancel</button>
+    </div>
+  </div>
 </div>
 
 <!-- Single-item confirm (manual add / adjust an entry) — modal, works from any pane -->

@@ -19,5 +19,21 @@
       "type": "image/png",
       "purpose": "any maskable"
     }
+  ],
+  "shortcuts": [
+    {
+      "name": "Say it",
+      "short_name": "Say it",
+      "description": "Log a meal by voice",
+      "url": "/?action=voice",
+      "icons": [{ "src": "/static/icon-192.png", "sizes": "192x192" }]
+    },
+    {
+      "name": "Snap it",
+      "short_name": "Snap it",
+      "description": "Log a meal by photo",
+      "url": "/?action=photo",
+      "icons": [{ "src": "/static/icon-192.png", "sizes": "192x192" }]
+    }
   ]
 }

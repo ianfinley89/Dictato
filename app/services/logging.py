@@ -92,3 +92,72 @@ def log_entry_for_user(
         "food_source_raw": food["source"],
         **snapshot,
     }
+
+
+def _snapshot(nutrients: dict, quantity_g: float) -> dict:
+    factor = quantity_g / 100.0
+    return {
+        "calories": round((nutrients.get("calories") or 0) * factor, 1),
+        "protein_g": round((nutrients.get("protein_g") or 0) * factor, 1),
+        "carbs_g": round((nutrients.get("carbs_g") or 0) * factor, 1),
+        "fat_g": round((nutrients.get("fat_g") or 0) * factor, 1),
+        "fiber_g": round((nutrients.get("fiber_g") or 0) * factor, 1),
+    }
+
+
+def update_entry_quantity(user_id: int, entry_id: int, quantity_g: float) -> dict:
+    """Change an entry's quantity and recompute its snapshot. Used by the
+    follow-up refinement flow ('say more' / 'add photo' after logging)."""
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT user_id, food_id FROM log_entries WHERE id=?", (entry_id,)
+        ).fetchone()
+        if not row or row["user_id"] != user_id:
+            raise FoodNotFound(f"Entry {entry_id} not found")
+    food = get_food_by_id(row["food_id"])
+    if not food:
+        raise FoodNotFound(f"Food for entry {entry_id} not found")
+    snapshot = _snapshot(food["nutrients_per_100g"], quantity_g)
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE log_entries SET quantity_g=?, nutrients_snapshot_json=? WHERE id=?",
+            (quantity_g, json.dumps(snapshot), entry_id),
+        )
+        label = source_label(conn, food["id"], food["source"])
+    return {"id": entry_id, "food_id": food["id"], "food_name": food["name"],
+            "food_brand": food.get("brand"), "quantity_g": quantity_g,
+            "food_source": label, "food_source_raw": food["source"], **snapshot}
+
+
+def remove_entry(user_id: int, entry_id: int) -> None:
+    with get_conn() as conn:
+        row = conn.execute("SELECT user_id FROM log_entries WHERE id=?", (entry_id,)).fetchone()
+        if not row or row["user_id"] != user_id:
+            raise FoodNotFound(f"Entry {entry_id} not found")
+        conn.execute("DELETE FROM log_entries WHERE id=?", (entry_id,))
+
+
+def current_entries(user_id: int, entry_ids: list[int]) -> list[dict]:
+    """The live state of a set of entries (post any undo/adjust/revision) in the
+    same shape the result card renders."""
+    if not entry_ids:
+        return []
+    marks = ",".join("?" * len(entry_ids))
+    with get_conn() as conn:
+        rows = conn.execute(
+            f"""SELECT le.*, f.name AS food_name, f.brand AS food_brand, f.source AS food_source_raw
+                FROM log_entries le JOIN foods f ON f.id = le.food_id
+                WHERE le.user_id=? AND le.id IN ({marks}) ORDER BY le.id""",
+            (user_id, *entry_ids),
+        ).fetchall()
+        out = []
+        for r in rows:
+            snap = json.loads(r["nutrients_snapshot_json"])
+            out.append({
+                "id": r["id"], "food_id": r["food_id"], "food_name": r["food_name"],
+                "food_brand": r["food_brand"], "eaten_at": r["eaten_at"],
+                "quantity_g": r["quantity_g"], "source": r["source"], "notes": r["notes"],
+                "food_source": source_label(conn, r["food_id"], r["food_source_raw"]),
+                "food_source_raw": r["food_source_raw"], **snap,
+            })
+    return out

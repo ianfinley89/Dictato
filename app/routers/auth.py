@@ -2,7 +2,7 @@ from fastapi import APIRouter, HTTPException, Response, Request
 from app.models import RegisterRequest, LoginRequest, GoalsUpdate, DeleteAccountRequest
 from app.auth import hash_password, verify_password, make_session_token, get_current_user_id
 from app.database import get_conn
-from app.config import SESSION_COOKIE_NAME, SECURE_COOKIES
+from app.config import SESSION_COOKIE_NAME, SECURE_COOKIES, ADMIN_EMAILS
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
@@ -50,7 +50,7 @@ async def me(request: Request):
         ).fetchone()
     if not row:
         raise HTTPException(404, "User not found")
-    return dict(row)
+    return {**dict(row), "is_admin": row["email"].lower() in ADMIN_EMAILS}
 
 
 @router.put("/goals")
@@ -80,6 +80,10 @@ async def delete_account(req: DeleteAccountRequest, request: Request, response: 
         if not row or not verify_password(req.password, row["password_hash"]):
             raise HTTPException(403, "Incorrect password")
 
+        photo_paths = [r["photo_path"] for r in conn.execute(
+            "SELECT photo_path FROM capture_log WHERE user_id=? AND photo_path IS NOT NULL", (uid,)
+        )]
+
         conn.execute("DELETE FROM log_entries WHERE user_id=?", (uid,))
         conn.execute("DELETE FROM favorites WHERE user_id=?", (uid,))
         conn.execute("DELETE FROM water_log WHERE user_id=?", (uid,))
@@ -89,6 +93,8 @@ async def delete_account(req: DeleteAccountRequest, request: Request, response: 
         conn.execute("DELETE FROM capture_log WHERE user_id=?", (uid,))
         conn.execute("DELETE FROM user_profile WHERE user_id=?", (uid,))
         conn.execute("DELETE FROM coach_messages WHERE user_id=?", (uid,))
+        conn.execute("DELETE FROM model_traces WHERE user_id=?", (uid,))
+        conn.execute("DELETE FROM issue_reports WHERE user_id=?", (uid,))
         conn.execute("DELETE FROM shared_entries WHERE from_user_id=? OR to_user_id=?", (uid, uid))
         conn.execute("DELETE FROM friends WHERE user_id=? OR friend_user_id=?", (uid, uid))
         conn.execute(
@@ -103,6 +109,15 @@ async def delete_account(req: DeleteAccountRequest, request: Request, response: 
         # Kept public cache rows (e.g. 'web') must not point at the deleted user.
         conn.execute("UPDATE foods SET created_by_user_id=NULL WHERE created_by_user_id=?", (uid,))
         conn.execute("DELETE FROM users WHERE id=?", (uid,))
+
+    # Stored capture photos go with the account (best-effort; rows already gone).
+    import os
+    for p in photo_paths:
+        try:
+            os.remove(p)
+        except OSError:
+            pass
+
     response.delete_cookie(SESSION_COOKIE_NAME)
     return {"ok": True}
 

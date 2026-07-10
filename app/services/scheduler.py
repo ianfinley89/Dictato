@@ -8,7 +8,7 @@ A `last_fired` date guard ensures each reminder sends at most once per day.
 import asyncio
 import time
 from datetime import datetime, timezone
-from app.database import get_conn, purge_expired_cache
+from app.database import get_conn, purge_expired_cache, purge_old_telemetry
 from app.services.push import send_to_user
 
 PROMPT = {
@@ -32,11 +32,13 @@ async def reminder_loop():
 
 
 def _maybe_purge():
-    """Purge expired FatSecret cache roughly hourly (license requirement)."""
+    """Hourly housekeeping: expired FatSecret cache (license requirement) and
+    30-day-old telemetry (traces / server errors)."""
     global _last_purge
     if time.time() - _last_purge >= 3600:
         _last_purge = time.time()
         purge_expired_cache()
+        purge_old_telemetry()
 
 
 async def _tick():

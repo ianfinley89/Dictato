@@ -2,11 +2,14 @@
 zero-cost fast path, otherwise run the agent tool loop. Entries are saved
 server-side; the frontend shows the result with per-entry Undo/Adjust."""
 import json
+import os
+import uuid
 from fastapi import APIRouter, Request, HTTPException, UploadFile, File, Form
 
 from app.auth import get_current_user_id
 from app.services import agent, stt
 from app.services.ai_usage import check_and_increment, get_today_usage
+from app.services.logging import current_entries
 from app.database import get_conn
 from app.config import ANTHROPIC_API_KEY, AI_DAILY_LIMIT
 
@@ -17,32 +20,57 @@ _IMG_MAX = 5 * 1024 * 1024    # client compresses to ~1024px first
 _AUDIO_MAX = 15 * 1024 * 1024  # a couple minutes of webm/opus or AAC
 
 # Keep only the analysis-relevant fields of each logged entry in the capture log.
+# (`id` = log_entries id, so later analysis can tell which entries were undone.)
 _CAPTURE_ENTRY_KEYS = (
-    "food_name", "food_brand", "quantity_g", "food_source",
+    "id", "food_name", "food_brand", "quantity_g", "food_source",
     "calories", "protein_g", "carbs_g", "fat_g", "fiber_g",
 )
 
 
-def _record_capture(uid, input_type, transcript, summary, entries, fast_path):
-    """Persist every capture verbatim for later analysis / coaching. Best-effort:
-    a logging failure must never break the actual food logging."""
+def _record_capture(uid, input_type, transcript, summary, entries, fast_path,
+                    annotation=None, photo_path=None, parent_capture_id=None):
+    """Persist every capture verbatim for later analysis / coaching / datasets.
+    Best-effort: a logging failure must never break the actual food logging."""
     try:
+        a = annotation or {}
         slim = [{k: e.get(k) for k in _CAPTURE_ENTRY_KEYS if k in e} for e in (entries or [])]
         with get_conn() as conn:
-            conn.execute(
+            cur = conn.execute(
                 """INSERT INTO capture_log
-                   (user_id, input_type, transcript, summary, entries_json, fast_path)
-                   VALUES (?,?,?,?,?,?)""",
-                (uid, input_type, transcript, summary, json.dumps(slim), 1 if fast_path else 0),
+                   (user_id, input_type, transcript, summary, entries_json, fast_path,
+                    meal, meal_label, tags_json, specificity, photo_path, parent_capture_id)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (uid, input_type, transcript, summary, json.dumps(slim), 1 if fast_path else 0,
+                 a.get("meal"), a.get("meal_label"), json.dumps(a.get("tags") or []),
+                 a.get("specificity"), photo_path, parent_capture_id),
             )
+            return cur.lastrowid
     except Exception:
-        pass
+        return None
+
+
+def _save_capture_photo(image_bytes: bytes, image_type: str) -> str | None:
+    """Keep the compressed capture photo on disk — it's the image half of the
+    photo→label training pairs. Lives outside the web root; deleted with the
+    account. Best-effort."""
+    try:
+        ext = {"image/jpeg": "jpg", "image/png": "png", "image/webp": "webp"}.get(image_type, "jpg")
+        d = os.path.join(os.getenv("UPLOAD_DIR", "uploads"), "captures")
+        os.makedirs(d, exist_ok=True)
+        path = os.path.join(d, f"{uuid.uuid4().hex}.{ext}")
+        with open(path, "wb") as f:
+            f.write(image_bytes)
+        return path
+    except Exception:
+        return None
 
 
 @router.post("/log")
 async def agent_log(
     request: Request,
     text: str | None = Form(None),
+    tz_offset: int = Form(0),
+    revise_capture_id: int | None = Form(None),
     audio: UploadFile | None = File(None),
     image: UploadFile | None = File(None),
 ):
@@ -83,15 +111,37 @@ async def agent_log(
     if not transcript and not image_bytes:
         raise HTTPException(400, "Provide text, audio, or an image.")
 
+    # Follow-up refinement ("say more" / "add photo" after a log): load the
+    # original capture and let the agent reconcile it with the new context.
+    revision = None
+    if revise_capture_id is not None:
+        with get_conn() as conn:
+            row = conn.execute(
+                "SELECT user_id, transcript, entries_json FROM capture_log WHERE id=?",
+                (revise_capture_id,),
+            ).fetchone()
+        if not row or row["user_id"] != uid:
+            raise HTTPException(404, "Capture not found")
+        try:
+            original_ids = [e["id"] for e in json.loads(row["entries_json"] or "[]") if e.get("id")]
+        except json.JSONDecodeError:
+            original_ids = []
+        revision = {"transcript": row["transcript"],
+                    "entries": current_entries(uid, original_ids),
+                    "original_ids": original_ids}
+
     # Zero-cost fast path: every item matches a food this user already knows.
-    if transcript and not image_bytes:
+    # (Revisions always need the model — they reconcile, not just match.)
+    if transcript and not image_bytes and revision is None:
         entries = agent.fast_path_log(uid, transcript, method)
         if entries:
             names = ", ".join(e["food_name"] for e in entries)
             summary = f"Logged {names}."
-            _record_capture(uid, input_type, transcript, summary, entries, fast_path=True)
-            return {"transcript": transcript, "summary": summary,
-                    "entries": entries, "fast_path": True}
+            annotation = agent.fast_path_annotation(transcript, entries, tz_offset)
+            capture_id = _record_capture(uid, input_type, transcript, summary, entries,
+                                         fast_path=True, annotation=annotation)
+            return {"capture_id": capture_id, "transcript": transcript, "summary": summary,
+                    "entries": entries, "annotation": annotation, "fast_path": True}
 
     if not ANTHROPIC_API_KEY:
         raise HTTPException(503, "AI logging is not configured.")
@@ -100,11 +150,29 @@ async def agent_log(
 
     result = await agent.run_agent(
         uid, text=transcript, image=image_bytes,
-        image_media_type=image_type, method=method,
+        image_media_type=image_type, method=method, tz_offset=tz_offset,
+        revision=revision,
     )
-    _record_capture(uid, input_type, transcript, result["summary"], result["entries"], fast_path=False)
-    return {"transcript": transcript, "summary": result["summary"],
-            "entries": result["entries"], "fast_path": False}
+
+    photo_path = _save_capture_photo(image_bytes, image_type) if image_bytes else None
+
+    if revision is not None:
+        # Final state = the surviving originals plus anything newly logged.
+        all_ids = revision["original_ids"] + [e["id"] for e in result["entries"]]
+        entries = current_entries(uid, all_ids)
+        capture_id = _record_capture(uid, input_type, transcript, result["summary"], entries,
+                                     fast_path=False, annotation=result.get("annotation"),
+                                     photo_path=photo_path, parent_capture_id=revise_capture_id)
+        return {"capture_id": capture_id, "transcript": transcript, "summary": result["summary"],
+                "entries": entries, "annotation": result.get("annotation") or {},
+                "fast_path": False, "revised": True}
+
+    capture_id = _record_capture(uid, input_type, transcript, result["summary"], result["entries"],
+                                 fast_path=False, annotation=result.get("annotation"),
+                                 photo_path=photo_path)
+    return {"capture_id": capture_id, "transcript": transcript, "summary": result["summary"],
+            "entries": result["entries"], "annotation": result.get("annotation") or {},
+            "fast_path": False}
 
 
 @router.get("/usage")

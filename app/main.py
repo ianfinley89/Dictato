@@ -5,7 +5,7 @@ from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from app.database import init_db
-from app.routers import agent, auth, coach, foods, log, push, reminders, recipes
+from app.routers import admin, agent, auth, coach, foods, issues, log, push, reminders, recipes
 from app.services.scheduler import reminder_loop
 
 
@@ -26,10 +26,31 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Dictato", lifespan=lifespan)
 
+
+@app.middleware("http")
+async def record_unhandled_errors(request, call_next):
+    """Log unhandled exceptions to app_errors so production failures are visible
+    in the admin dashboard. Best-effort; the error still propagates as a 500."""
+    try:
+        return await call_next(request)
+    except Exception as e:
+        try:
+            from app.database import get_conn
+            with get_conn() as conn:
+                conn.execute(
+                    "INSERT INTO app_errors (method, path, error) VALUES (?,?,?)",
+                    (request.method, request.url.path, repr(e)[:1000]),
+                )
+        except Exception:
+            pass
+        raise
+
+app.include_router(admin.router)
 app.include_router(agent.router)
 app.include_router(auth.router)
 app.include_router(coach.router)
 app.include_router(foods.router)
+app.include_router(issues.router)
 app.include_router(log.router)
 app.include_router(push.router)
 app.include_router(reminders.router)

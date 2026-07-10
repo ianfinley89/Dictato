@@ -11,13 +11,16 @@ Nothing here invents food nutrition — that stays the logger's job. The coach
 only reasons over what was already logged and said.
 """
 import json
-from datetime import datetime, timezone
 
 from app.database import get_conn
-from app.services.ai import MODEL_HAIKU, _client
+from app.services import llm
 from app.services.ai_usage import record_tokens
+from app.services.profile import get_profile, merge_facts, apply_profile_update
 
-COACH_MODEL = MODEL_HAIKU   # easy to bump to Sonnet if we want deeper analysis
+# Back-compat aliases (tests and older callers use the underscored names).
+_merge_facts = merge_facts
+_apply_profile_update = apply_profile_update
+
 _MAX_TURNS = 3
 _HISTORY_LIMIT = 10
 _NOTES_LIMIT = 20
@@ -43,13 +46,21 @@ _UPDATE_PROFILE_TOOL = {
 _SYSTEM = """You are the Dictato coach — a warm, encouraging, evidence-based nutrition and \
 fitness companion. You are talking with the user about their eating and progress.
 
-Ground everything in the DATA below (their goals, recent daily totals, recent notes, and \
-profile). When the data is thin or missing, say so plainly and ask ONE friendly question rather \
-than guessing. Never invent specific calorie/macro numbers for foods — those come from their log.
+Ground everything in the DATA below (their goals, recent daily totals, recent notes with meal \
+tags, and profile). When the data is thin or missing, say so plainly and ask ONE friendly \
+question rather than guessing. Never invent specific calorie/macro numbers for foods — those \
+come from their log. Notes marked low specificity are rough estimates; weight them accordingly.
 
 Be a good listener: when the user mentions a durable fact about themselves (a weigh-in, their \
 sex/age/height, training style, their goal, foods they like or avoid, injuries), call \
 update_profile to remember it. Don't announce that you're saving it — just weave it in naturally.
+
+NEVER assume a typical body or life. Check the profile first: pregnancy or postpartum, \
+disability, illness, unusual height or weight, age — any of these change what good advice is. \
+If a recommendation depends on a fact you don't have, ask instead of assuming. When calorie or \
+macro targets come up, use calc_targets to compute them from their actual stats — never estimate \
+those numbers yourself, and if stats are missing, ask for them. You cannot change their goals; \
+when you recommend new targets, show the numbers and point them to Settings → Set goals.
 
 Give specific, kind, actionable suggestions, and connect them to what you see (e.g. "your protein \
 has averaged 90g against your 150g goal — adding a scoop of whey would close most of that gap"). \
@@ -57,35 +68,54 @@ Keep replies short and conversational (2-4 sentences unless they ask for detail)
 doctor; for medical concerns, gently suggest a professional. No markdown headings."""
 
 
-def _merge_facts(old: dict, new: dict) -> dict:
-    out = dict(old)
-    for k, v in (new or {}).items():
-        if isinstance(v, list) and isinstance(out.get(k), list):
-            out[k] = out[k] + v
-        elif isinstance(v, dict) and isinstance(out.get(k), dict):
-            out[k] = {**out[k], **v}
-        else:
-            out[k] = v
-    return out
+_CALC_TARGETS_TOOL = {
+    "name": "calc_targets",
+    "description": (
+        "Compute daily calorie/protein targets from the user's actual stats "
+        "(Mifflin-St Jeor BMR × activity, adjusted for their goal). Use this whenever "
+        "targets come up — never estimate these numbers yourself."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "sex": {"type": "string", "enum": ["male", "female"]},
+            "age": {"type": "number"},
+            "height_cm": {"type": "number"},
+            "height_in": {"type": "number", "description": "use if height is known in inches"},
+            "weight_kg": {"type": "number"},
+            "weight_lbs": {"type": "number", "description": "use if weight is known in pounds"},
+            "activity_level": {"type": "string",
+                               "enum": ["sedentary", "light", "moderate", "very_active"]},
+            "goal": {"type": "string", "enum": ["cut", "maintain", "bulk"]},
+        },
+        "required": ["sex", "age", "activity_level", "goal"],
+    },
+}
+
+_ACTIVITY_FACTOR = {"sedentary": 1.2, "light": 1.375, "moderate": 1.55, "very_active": 1.725}
+_GOAL_DELTA = {"cut": -400, "maintain": 0, "bulk": 300}
 
 
-def get_profile(uid: int) -> dict:
-    with get_conn() as conn:
-        row = conn.execute("SELECT facts_json FROM user_profile WHERE user_id=?", (uid,)).fetchone()
-    return json.loads(row["facts_json"]) if row else {}
-
-
-def _apply_profile_update(uid: int, facts: dict) -> None:
-    if not facts:
-        return
-    merged = _merge_facts(get_profile(uid), facts)
-    now = datetime.now(timezone.utc).isoformat()
-    with get_conn() as conn:
-        conn.execute(
-            """INSERT INTO user_profile (user_id, facts_json, updated_at) VALUES (?,?,?)
-               ON CONFLICT(user_id) DO UPDATE SET facts_json=excluded.facts_json, updated_at=excluded.updated_at""",
-            (uid, json.dumps(merged), now),
-        )
+def calc_targets(inp: dict) -> dict:
+    """Deterministic target math — the formula supplies numbers, the model supplies judgment."""
+    height_cm = inp.get("height_cm") or (inp.get("height_in") or 0) * 2.54
+    weight_kg = inp.get("weight_kg") or (inp.get("weight_lbs") or 0) * 0.4536
+    if not height_cm or not weight_kg:
+        return {"error": "need height (cm or in) and weight (kg or lbs)"}
+    age = float(inp.get("age") or 0)
+    if not (10 <= age <= 110):
+        return {"error": "need a plausible age"}
+    sex_term = 5 if inp.get("sex") == "male" else -161
+    bmr = 10 * weight_kg + 6.25 * height_cm - 5 * age + sex_term
+    tdee = bmr * _ACTIVITY_FACTOR.get(inp.get("activity_level"), 1.375)
+    goal = inp.get("goal", "maintain")
+    return {
+        "bmr": round(bmr),
+        "tdee": round(tdee),
+        "suggested_calories": round(tdee + _GOAL_DELTA.get(goal, 0)),
+        "suggested_protein_g": round(1.8 * weight_kg),   # 1.8 g/kg — solid general target
+        "basis": f"Mifflin-St Jeor, {inp.get('activity_level')} activity, {goal}",
+    }
 
 
 def get_history(uid: int, limit: int = 50) -> list[dict]:
@@ -124,7 +154,8 @@ def _build_context(uid: int, profile: dict) -> str:
             (uid,),
         ).fetchall()
         notes = conn.execute(
-            """SELECT DATE(created_at) AS d, transcript FROM capture_log
+            """SELECT DATE(created_at) AS d, transcript, meal, meal_label, tags_json, specificity
+               FROM capture_log
                WHERE user_id=? AND transcript IS NOT NULL AND transcript != ''
                ORDER BY id DESC LIMIT ?""",
             (uid, _NOTES_LIMIT),
@@ -135,7 +166,22 @@ def _build_context(uid: int, profile: dict) -> str:
         {"date": r["d"], "calories": r["cal"], "protein_g": r["p"], "carbs_g": r["c"], "fat_g": r["f"]}
         for r in days
     ]
-    recent_notes = [{"date": r["d"], "said": r["transcript"]} for r in reversed(notes)]
+    recent_notes = []
+    for r in reversed(notes):
+        n = {"date": r["d"], "said": r["transcript"]}
+        if r["meal"]:
+            n["meal"] = r["meal"]
+        if r["meal_label"]:
+            n["label"] = r["meal_label"]
+        try:
+            tags = json.loads(r["tags_json"] or "[]")
+            if tags:
+                n["tags"] = tags
+        except json.JSONDecodeError:
+            pass
+        if r["specificity"]:
+            n["specificity"] = r["specificity"]
+        recent_notes.append(n)
 
     return (
         f"USER: {u['display_name'] if u else 'there'}\n"
@@ -152,29 +198,31 @@ async def chat(uid: int, message: str) -> dict:
     profile = get_profile(uid)
     system = _SYSTEM + "\n\n=== DATA ===\n" + _build_context(uid, profile)
 
-    messages = [{"role": m["role"], "content": m["content"]} for m in get_history(uid, _HISTORY_LIMIT)]
-    messages.append({"role": "user", "content": message})
+    messages = [{"role": m["role"], "text": m["content"]} for m in get_history(uid, _HISTORY_LIMIT)]
+    messages.append({"role": "user", "text": message})
 
-    client = _client()
     reply = ""
     for _ in range(_MAX_TURNS):
-        resp = await client.messages.create(
-            model=COACH_MODEL, max_tokens=800, system=system,
-            tools=[_UPDATE_PROFILE_TOOL], messages=messages,
-        )
-        record_tokens(uid, resp.usage.input_tokens, resp.usage.output_tokens)
+        resp = await llm.chat(feature="coach", system=system, messages=messages,
+                              tools=[_UPDATE_PROFILE_TOOL, _CALC_TARGETS_TOOL],
+                              max_tokens=800, user_id=uid)
+        record_tokens(uid, resp.input_tokens, resp.output_tokens)
 
-        tool_uses = [b for b in resp.content if b.type == "tool_use"]
-        if tool_uses:
-            messages.append({"role": "assistant", "content": resp.content})
+        if resp.tool_calls:
+            messages.append(resp.assistant_message())
             results = []
-            for tu in tool_uses:
-                if tu.name == "update_profile":
-                    _apply_profile_update(uid, tu.input.get("facts") or {})
-                results.append({"type": "tool_result", "tool_use_id": tu.id, "content": "saved"})
-            messages.append({"role": "user", "content": results})
+            for tc in resp.tool_calls:
+                if tc.name == "update_profile":
+                    apply_profile_update(uid, tc.input.get("facts") or {})
+                    out = "saved"
+                elif tc.name == "calc_targets":
+                    out = json.dumps(calc_targets(tc.input))
+                else:
+                    out = "unknown tool"
+                results.append({"id": tc.id, "name": tc.name, "content": out})
+            messages.append({"role": "tool", "results": results})
             continue   # let the model finish with a spoken reply
-        reply = " ".join(b.text.strip() for b in resp.content if b.type == "text").strip()
+        reply = resp.text
         break
 
     if not reply:

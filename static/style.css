@@ -211,6 +211,26 @@ input:focus {
   background: rgba(0,0,0,0.4);
 }
 
+textarea {
+  background: rgba(0,0,0,0.28);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 12px;
+  padding: 12px 14px;
+  font-size: 1rem;
+  font-family: inherit;
+  width: 100%;
+  outline: none;
+  resize: vertical;
+  margin-bottom: 12px;
+  transition: border-color 0.2s, box-shadow 0.2s;
+}
+textarea::placeholder { color: rgba(155,155,192,0.65); }
+textarea:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(139,124,255,0.18);
+}
+
 /* ═══ Buttons ═══ */
 .btn-primary {
   background: var(--grad);
@@ -298,7 +318,8 @@ button:focus-visible, input:focus-visible, .chip:focus-visible {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
+  flex-wrap: wrap;              /* the admin-only 5th item can wrap on tiny screens */
+  gap: 6px 12px;
   padding: 11px 18px;
 }
 
@@ -1025,6 +1046,38 @@ button:focus-visible, input:focus-visible, .chip:focus-visible {
 
 .result-entry .link-btn { flex-shrink: 0; margin: 0; }
 
+.result-followup {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.result-followup .btn-secondary { padding: 10px; font-size: 0.85rem; }
+
+.result-report { display: block; margin: 10px auto 0; color: var(--text-muted); }
+.result-report:hover { color: var(--accent2); }
+
+/* Capture annotation chips (meal, label, tags) on the result card */
+#result-annotation { margin-bottom: 12px; }
+
+.ann-chip {
+  display: inline-block;
+  background: rgba(76,201,240,0.08);
+  border: 1px solid rgba(76,201,240,0.25);
+  color: var(--accent2);
+  border-radius: 12px;
+  padding: 3px 10px;
+  font-size: 0.72rem;
+  font-weight: 600;
+  margin: 0 6px 6px 0;
+}
+
+.ann-hint {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  font-style: italic;
+  margin-top: 2px;
+}
+
 /* ═══ Log & Settings panes ═══ */
 .sub-screen {
   max-width: 560px;
@@ -1329,8 +1382,9 @@ button:focus-visible, input:focus-visible, .chip:focus-visible {
 }
 .cf-web-note a { color: var(--accent2); }
 
-/* ═══ Create recipe / custom food modal ═══ */
-#create-overlay {
+/* ═══ Create-food & report-issue modals ═══ */
+#create-overlay,
+#issue-overlay {
   position: fixed;
   inset: 0;
   z-index: 850;
@@ -1604,6 +1658,97 @@ button:focus-visible, input:focus-visible, .chip:focus-visible {
 }
 .btn-danger:hover { background: rgba(242,85,85,0.12); }
 .btn-danger:active { transform: scale(0.97); }
+
+/* ═══ Admin dashboard ═══ */
+.stat-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 10px;
+}
+
+.stat-cell {
+  background: rgba(0,0,0,0.25);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 13px 8px 11px;
+  text-align: center;
+}
+
+.stat-val { font-size: 1.25rem; font-weight: 800; font-variant-numeric: tabular-nums; }
+.stat-label { font-size: 0.64rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.08em; margin-top: 3px; }
+
+.admin-table-wrap { overflow-x: auto; }
+
+.admin-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.8rem;
+  font-variant-numeric: tabular-nums;
+}
+.admin-table th {
+  text-align: left;
+  color: var(--text-muted);
+  font-size: 0.66rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+}
+.admin-table td {
+  padding: 7px 8px;
+  border-bottom: 1px solid rgba(255,255,255,0.05);
+  white-space: nowrap;
+}
+
+.fail-item {
+  background: rgba(0,0,0,0.25);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 10px 12px;
+  margin-bottom: 8px;
+}
+.fail-meta { font-size: 0.68rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.05em; }
+.fail-transcript { font-size: 0.88rem; font-style: italic; margin-top: 4px; }
+.fail-summary { font-size: 0.78rem; color: var(--text-muted); margin-top: 4px; }
+
+/* Model-call traces (expandable) */
+.trace-item {
+  background: rgba(0,0,0,0.25);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 9px 12px;
+  margin-bottom: 8px;
+  font-size: 0.78rem;
+}
+.trace-item.trace-error { border-color: rgba(242,85,85,0.45); }
+.trace-item summary {
+  cursor: pointer;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  align-items: baseline;
+  list-style: none;
+}
+.trace-item summary::-webkit-details-marker { display: none; }
+.trace-when { color: var(--text-muted); font-variant-numeric: tabular-nums; }
+.trace-who { font-weight: 700; }
+.trace-what { color: var(--text-muted); }
+.trace-nums { margin-left: auto; color: var(--text-muted); font-variant-numeric: tabular-nums; }
+.trace-error .trace-nums { color: var(--danger); }
+
+.trace-pre {
+  margin-top: 8px;
+  padding: 8px 10px;
+  background: rgba(0,0,0,0.35);
+  border-radius: 8px;
+  font-size: 0.72rem;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 240px;
+  overflow-y: auto;
+  color: var(--text);
+}
 
 /* ═══ Coach chat ═══ */
 #coach-screen {

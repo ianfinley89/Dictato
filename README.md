@@ -38,8 +38,30 @@ Open http://localhost:8000 — register an account and start logging.
 ## Run tests
 
 ```bash
-pytest tests/ -v
+uv run pytest tests/ -v
 ```
+
+## Swapping the LLM backend
+
+The coach and the voice/photo agent run through one swappable interface
+([app/services/llm.py](app/services/llm.py)). By default everything is Anthropic
+Claude (native tool use, vision, web-search). To A/B other models, set in `.env`:
+
+```bash
+LLM_PROVIDER=openai
+# OpenRouter (cloud): DeepSeek / Qwen / Gemini behind one key
+LLM_BASE_URL=https://openrouter.ai/api/v1
+LLM_API_KEY=sk-or-...
+LLM_MODEL=deepseek/deepseek-chat
+# …or a local model via Ollama:
+# LLM_BASE_URL=http://localhost:11434/v1
+# LLM_API_KEY=ollama
+# LLM_MODEL=gemma3
+```
+
+Notes: tool-calling quality varies by model (small local models may degrade the
+agent); the nutrition web-lookup stays on Claude (it needs server-side search);
+and photo logging needs a vision-capable model (Qwen-VL, Gemma-3, Gemini).
 
 ## API
 
@@ -60,6 +82,11 @@ pytest tests/ -v
 | GET | `/api/agent/usage` | Today's AI usage + daily limit |
 | GET | `/api/coach/history` | Coach chat history + accumulated profile |
 | POST | `/api/coach/chat` | Ask the coach (reads your logs/notes/goals/profile; remembers facts) |
+| GET | `/api/admin/stats?days=` | Usage/eval aggregates (ADMIN_EMAILS only) |
+| GET | `/api/admin/failures?days=` | Captures that logged nothing, with transcripts (ADMIN_EMAILS only) |
+| GET | `/api/admin/traces` | Per-model-call traces: latency, tokens, response, errors (admin) |
+| GET | `/api/admin/issues` · `/errors` | User issue reports · unhandled server errors (admin) |
+| POST | `/api/issues/` | File an issue report (any signed-in user; context auto-attached) |
 | PUT | `/api/auth/goals` | Set calorie + macro goals |
 | GET | `/api/push/vapid-key` | Public VAPID key for the browser |
 | POST | `/api/push/subscribe` · `/unsubscribe` · `/test` | Manage/ test web-push subscriptions |

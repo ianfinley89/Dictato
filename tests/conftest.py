@@ -4,6 +4,10 @@ from fastapi.testclient import TestClient
 
 # Never load the Whisper model (8s + big download) inside the test suite.
 os.environ["WHISPER_WARMUP"] = "false"
+# The TestClient talks http, so a Secure session cookie would never come back
+# (401s everywhere). Cookie security is a production concern — force it off here
+# regardless of the developer's .env.
+os.environ["SECURE_COOKIES"] = "false"
 
 
 @pytest.fixture(autouse=True)

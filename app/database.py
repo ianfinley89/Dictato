@@ -131,7 +131,13 @@ CREATE TABLE IF NOT EXISTS capture_log (
     transcript TEXT,                   -- voice-to-text or typed text (null for photo-only)
     summary TEXT,                      -- the agent's one-line "what I logged" sentence
     entries_json TEXT,                 -- snapshot of what got logged (names, qty, macros)
-    fast_path INTEGER NOT NULL DEFAULT 0
+    fast_path INTEGER NOT NULL DEFAULT 0,
+    meal TEXT,                         -- breakfast | lunch | dinner | snack | drink
+    meal_label TEXT,                   -- short human name for the whole capture ("cereal with berries")
+    tags_json TEXT,                    -- ["activity:cycling", "restaurant:taco-bell", ...]
+    specificity TEXT,                  -- low | medium | high — how precise the user was
+    photo_path TEXT,                   -- saved capture photo (dataset material; deleted with account)
+    parent_capture_id INTEGER          -- set on follow-up refinements ("say more" / "add photo")
 );
 
 -- Durable per-user profile the coach builds up over time: goals context,
@@ -151,10 +157,47 @@ CREATE TABLE IF NOT EXISTS coach_messages (
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+-- One row per model call (MLflow-style tracing, kept in-app): what was sent,
+-- what came back, how long it took, what it cost — including failed calls.
+CREATE TABLE IF NOT EXISTS model_traces (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER,
+    feature TEXT NOT NULL,             -- 'agent' | 'coach'
+    provider TEXT NOT NULL,            -- 'anthropic' | 'openai'
+    model TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    latency_ms INTEGER,
+    input_tokens INTEGER,
+    output_tokens INTEGER,
+    stop_reason TEXT,
+    error TEXT,                        -- exception text when the call failed
+    request_json TEXT,                 -- sanitized system+messages (images redacted)
+    response_json TEXT                 -- text + tool calls
+);
+
+-- User-filed issue reports, with whatever context the app auto-attached.
+CREATE TABLE IF NOT EXISTS issue_reports (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL REFERENCES users(id),
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    message TEXT NOT NULL,
+    context_json TEXT
+);
+
+-- Unhandled server errors (the "normal software" telemetry).
+CREATE TABLE IF NOT EXISTS app_errors (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    method TEXT,
+    path TEXT,
+    error TEXT
+);
+
 CREATE INDEX IF NOT EXISTS idx_log_user_eaten ON log_entries(user_id, eaten_at);
 CREATE INDEX IF NOT EXISTS idx_foods_name ON foods(name);
 CREATE INDEX IF NOT EXISTS idx_capture_user_created ON capture_log(user_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_coach_user_created ON coach_messages(user_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_traces_created ON model_traces(created_at);
 """
 
 
@@ -163,6 +206,14 @@ def init_db() -> None:
         conn.executescript(SCHEMA)
         _migrate(conn)
     purge_expired_cache()
+
+
+def purge_old_telemetry(days: int = 30) -> None:
+    """Traces and server errors are debugging data, not user records — keep the
+    DB small by dropping anything older than `days`. Issue reports are kept."""
+    with get_conn() as conn:
+        conn.execute("DELETE FROM model_traces WHERE created_at < datetime('now', ?)", (f"-{days} days",))
+        conn.execute("DELETE FROM app_errors WHERE created_at < datetime('now', ?)", (f"-{days} days",))
 
 
 def purge_expired_cache() -> int:
@@ -197,6 +248,13 @@ def _migrate(conn) -> None:
         conn.execute("ALTER TABLE reminders ADD COLUMN tz_offset INTEGER NOT NULL DEFAULT 0")
     if "last_fired" not in rem_cols:
         conn.execute("ALTER TABLE reminders ADD COLUMN last_fired TEXT")
+
+    cap_cols = {r["name"] for r in conn.execute("PRAGMA table_info(capture_log)")}
+    for col in ("meal", "meal_label", "tags_json", "specificity", "photo_path"):
+        if col not in cap_cols:
+            conn.execute(f"ALTER TABLE capture_log ADD COLUMN {col} TEXT")
+    if "parent_capture_id" not in cap_cols:
+        conn.execute("ALTER TABLE capture_log ADD COLUMN parent_capture_id INTEGER")
 
 
 def _backfill_serving_g(conn) -> None:

@@ -1,7 +1,6 @@
 """Coach chat: history, the mocked chat loop, and hands-off profile building.
-No real Anthropic calls."""
+No real model calls."""
 import json
-import types
 
 import pytest
 
@@ -54,39 +53,33 @@ def test_coach_chat_rate_limited(client, monkeypatch):
 
 # ── Mocked chat loop ──────────────────────────────────────────────────────────
 
-def _block(**kw):
-    return types.SimpleNamespace(**kw)
+from app.services.llm import LLMResponse, ToolCall
 
 
-def _resp(blocks, stop_reason="end_turn"):
-    return types.SimpleNamespace(
-        content=blocks, stop_reason=stop_reason,
-        usage=types.SimpleNamespace(input_tokens=20, output_tokens=10),
-    )
+def _text(t):
+    return LLMResponse(text=t, tool_calls=[], stop_reason="end",
+                       input_tokens=20, output_tokens=10, raw={"role": "assistant", "content": t})
 
 
-class _FakeMessages:
-    def __init__(self, responses):
-        self._responses = list(responses)
-
-    async def create(self, **kwargs):
-        return self._responses.pop(0)
-
-
-class _FakeClient:
-    def __init__(self, responses):
-        self.messages = _FakeMessages(responses)
+def _tool(name, inp, tid="t1"):
+    return LLMResponse(text="", tool_calls=[ToolCall(tid, name, inp)], stop_reason="tool_use",
+                       input_tokens=20, output_tokens=10, raw=None)
 
 
 def _install(monkeypatch, responses):
-    from app.services import coach as coach_svc
+    from app.services import llm
     from app.routers import coach as coach_router
     monkeypatch.setattr(coach_router, "ANTHROPIC_API_KEY", "test-key")
-    monkeypatch.setattr(coach_svc, "_client", lambda: _FakeClient(responses))
+    seq = list(responses)
+
+    async def fake_chat(**kwargs):
+        return seq.pop(0)
+
+    monkeypatch.setattr(llm, "chat", fake_chat)
 
 
 def test_coach_chat_replies_and_persists(client, monkeypatch):
-    _install(monkeypatch, [_resp([_block(type="text", text="You're tracking well — keep it up!")])])
+    _install(monkeypatch, [_text("You're tracking well — keep it up!")])
     _register(client)
 
     r = client.post("/api/coach/chat", json={"message": "How am I doing?"})
@@ -101,13 +94,10 @@ def test_coach_chat_replies_and_persists(client, monkeypatch):
 
 def test_coach_remembers_profile_facts(client, monkeypatch):
     """A weigh-in mentioned in passing is saved via the update_profile tool."""
-    responses = [
-        _resp([_block(type="tool_use", id="t1", name="update_profile",
-                      input={"facts": {"sex": "male", "weigh_ins": [{"date": "2026-07-08", "lbs": 182}]}})],
-              stop_reason="tool_use"),
-        _resp([_block(type="text", text="Got it, logged you at 182. Nice work this week.")]),
-    ]
-    _install(monkeypatch, responses)
+    _install(monkeypatch, [
+        _tool("update_profile", {"facts": {"sex": "male", "weigh_ins": [{"date": "2026-07-08", "lbs": 182}]}}),
+        _text("Got it, logged you at 182. Nice work this week."),
+    ])
     _register(client)
 
     r = client.post("/api/coach/chat", json={"message": "morning weigh-in was 182, I'm a guy trying to bulk"})
@@ -136,3 +126,63 @@ def test_merge_facts_helper():
     assert merged["dislikes"] == ["olives", "mushrooms"]  # lists concatenated
     assert merged["height_cm"] == 178                    # new key added
     assert merged["sex"] == "male"                       # untouched key kept
+
+
+# ── calc_targets: deterministic target math ───────────────────────────────────
+
+def test_calc_targets_male_metric():
+    from app.services.coach import calc_targets
+    out = calc_targets({"sex": "male", "age": 30, "height_cm": 180, "weight_kg": 80,
+                        "activity_level": "moderate", "goal": "bulk"})
+    # BMR = 10*80 + 6.25*180 - 5*30 + 5 = 1780; TDEE = 1780*1.55 = 2759; bulk +300
+    assert out["bmr"] == 1780
+    assert out["tdee"] == 2759
+    assert out["suggested_calories"] == 3059
+    assert out["suggested_protein_g"] == 144
+
+
+def test_calc_targets_imperial_conversion():
+    from app.services.coach import calc_targets
+    # The user's 6'9" / 150 lbs corner case: tall + light = high TDEE despite low weight.
+    out = calc_targets({"sex": "male", "age": 25, "height_in": 81, "weight_lbs": 150,
+                        "activity_level": "light", "goal": "bulk"})
+    assert out["bmr"] == round(10 * 150 * 0.4536 + 6.25 * 81 * 2.54 - 5 * 25 + 5)
+    assert out["suggested_calories"] > 2400   # confirms "raise to 2400+" is what the math says
+
+
+def test_calc_targets_requires_stats():
+    from app.services.coach import calc_targets
+    assert "error" in calc_targets({"sex": "male", "age": 30, "activity_level": "light", "goal": "cut"})
+    assert "error" in calc_targets({"sex": "male", "age": 300, "height_cm": 180,
+                                    "weight_kg": 80, "activity_level": "light", "goal": "cut"})
+
+
+def test_coach_uses_calc_targets_tool(client, monkeypatch):
+    """The coach calls calc_targets, gets deterministic numbers back, and replies."""
+    _install(monkeypatch, [
+        _tool("calc_targets", {"sex": "male", "age": 25, "height_in": 81,
+                               "weight_lbs": 150, "activity_level": "light", "goal": "bulk"}),
+        _text("Based on your stats you'd maintain around 2,600 — for a bulk aim near 2,900. You can set that in Settings → Set goals."),
+    ])
+    _register(client)
+    r = client.post("/api/coach/chat", json={"message": "I'm 6'9 and 150lbs, 25yo male, lightly active — how much should I eat to bulk?"})
+    assert r.status_code == 200
+    assert "Settings" in r.json()["reply"]
+
+
+def test_coach_context_includes_annotations(client):
+    from app.services.coach import _build_context
+    from app.database import get_conn
+    uid = _register(client)
+    with get_conn() as conn:
+        conn.execute(
+            """INSERT INTO capture_log (user_id, input_type, transcript, entries_json,
+                                        meal, meal_label, tags_json, specificity)
+               VALUES (?,?,?,?,?,?,?,?)""",
+            (uid, "voice", "taco bell after biking", "[]",
+             "lunch", "taco bell run", '["activity:cycling"]', "low"),
+        )
+    ctx = _build_context(uid, {})
+    assert "activity:cycling" in ctx
+    assert "taco bell run" in ctx
+    assert "low" in ctx

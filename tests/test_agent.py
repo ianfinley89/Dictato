@@ -2,7 +2,6 @@
 mocked model loop. No real Anthropic or Whisper calls."""
 import io
 import json
-import types
 
 import pytest
 
@@ -221,47 +220,41 @@ def test_tool_log_food_unknown_id_returns_error(client):
     assert "error" in out
 
 
-# ── Mocked model loop ─────────────────────────────────────────────────────────
-
-def _block(**kw):
-    return types.SimpleNamespace(**kw)
+# ── Mocked model loop (patches the provider-neutral llm.chat) ─────────────────
+from app.services.llm import LLMResponse, ToolCall
 
 
-def _resp(blocks, stop_reason):
-    return types.SimpleNamespace(
-        content=blocks, stop_reason=stop_reason,
-        usage=types.SimpleNamespace(input_tokens=10, output_tokens=5),
-    )
+def _text(t):
+    return LLMResponse(text=t, tool_calls=[], stop_reason="end",
+                       input_tokens=10, output_tokens=5, raw={"role": "assistant", "content": t})
 
 
-class _FakeMessages:
-    def __init__(self, responses):
-        self._responses = list(responses)
-
-    async def create(self, **kwargs):
-        return self._responses.pop(0)
+def _tool(name, inp, tid="t1"):
+    return LLMResponse(text="", tool_calls=[ToolCall(tid, name, inp)], stop_reason="tool_use",
+                       input_tokens=10, output_tokens=5, raw=None)
 
 
-class _FakeClient:
-    def __init__(self, responses):
-        self.messages = _FakeMessages(responses)
+def _script_llm(monkeypatch, responses):
+    """Make llm.chat return the scripted responses in order."""
+    from app.services import llm
+    seq = list(responses)
+
+    async def fake_chat(**kwargs):
+        return seq.pop(0)
+
+    monkeypatch.setattr(llm, "chat", fake_chat)
 
 
 @pytest.fixture()
 def scripted_agent(monkeypatch):
-    """Patch the agent's model client with a scripted search→log→summary run."""
-    from app.services import agent as agent_svc
-
+    """Scripted search→log→summary run through the mocked llm.chat."""
     def install(food_name="rice cake"):
-        responses = [
-            _resp([_block(type="tool_use", id="t1", name="search_food_db",
-                          input={"query": food_name})], "tool_use"),
+        _script_llm(monkeypatch, [
+            _tool("search_food_db", {"query": food_name}, "t1"),
             # The fake model logs food_id 1 — tests seed exactly one food.
-            _resp([_block(type="tool_use", id="t2", name="log_food",
-                          input={"food_id": 1, "servings": 2})], "tool_use"),
-            _resp([_block(type="text", text=f"Logged 2 {food_name}s for you!")], "end_turn"),
-        ]
-        monkeypatch.setattr(agent_svc, "_client", lambda: _FakeClient(responses))
+            _tool("log_food", {"food_id": 1, "servings": 2}, "t2"),
+            _text(f"Logged 2 {food_name}s for you!"),
+        ])
 
     return install
 
@@ -302,25 +295,21 @@ def test_agent_loop_image_path(client, scripted_agent, monkeypatch):
 
 def test_agent_loop_survives_api_error_after_partial_log(client, monkeypatch):
     """If the API dies mid-session, already-logged entries are still returned."""
-    from app.services import agent as agent_svc
+    from app.services import llm
     from app.routers import agent as agent_router
     monkeypatch.setattr(agent_router, "ANTHROPIC_API_KEY", "test-key")
     uid = _register(client)
     _seed_food()
 
-    class _DyingMessages:
-        def __init__(self):
-            self.calls = 0
+    calls = {"n": 0}
 
-        async def create(self, **kwargs):
-            self.calls += 1
-            if self.calls == 1:
-                return _resp([_block(type="tool_use", id="t1", name="log_food",
-                                     input={"food_id": 1, "quantity_g": 50})], "tool_use")
-            raise RuntimeError("api down")
+    async def dying_chat(**kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return _tool("log_food", {"food_id": 1, "quantity_g": 50}, "t1")
+        raise RuntimeError("api down")
 
-    fake = types.SimpleNamespace(messages=_DyingMessages())
-    monkeypatch.setattr(agent_svc, "_client", lambda: fake)
+    monkeypatch.setattr(llm, "chat", dying_chat)
 
     r = client.post("/api/agent/log", data={"text": "something novel"})
     assert r.status_code == 200
@@ -401,3 +390,252 @@ def test_capture_log_records_voice_input_type(client, monkeypatch):
         r = conn.execute("SELECT * FROM capture_log WHERE user_id=?", (uid,)).fetchone()
     assert r["input_type"] == "voice"
     assert r["transcript"] == "I had two rice cakes"
+
+
+# ── Capture annotations (tags, meal labels, specificity, passive facts) ───────
+
+def test_agent_annotation_stored_and_facts_merged(client, monkeypatch):
+    """The annotate_capture tool labels the capture and quietly updates the profile."""
+    from app.routers import agent as agent_router
+    monkeypatch.setattr(agent_router, "ANTHROPIC_API_KEY", "test-key")
+    uid = _register(client)
+    _seed_food()
+
+    _script_llm(monkeypatch, [
+        _tool("log_food", {"food_id": 1, "servings": 2}, "t1"),
+        _tool("annotate_capture", {
+            "meal": "snack", "meal_label": "rice cakes", "tags": ["context:post-workout"],
+            "specificity": "medium", "observed_facts": {"rides_bike": True},
+        }, "t2"),
+        _text("Logged 2 rice cakes!"),
+    ])
+
+    r = client.post("/api/agent/log", data={"text": "two rice cakes after I rode my bike home"})
+    assert r.status_code == 200
+    a = r.json()["annotation"]
+    assert a["meal"] == "snack"
+    assert a["meal_label"] == "rice cakes"
+    assert a["tags"] == ["context:post-workout"]
+    assert a["specificity"] == "medium"
+
+    with get_conn() as conn:
+        row = conn.execute("SELECT * FROM capture_log WHERE user_id=?", (uid,)).fetchone()
+    assert row["meal"] == "snack"
+    assert row["meal_label"] == "rice cakes"
+    assert json.loads(row["tags_json"]) == ["context:post-workout"]
+    assert row["specificity"] == "medium"
+
+    from app.services.profile import get_profile
+    assert get_profile(uid)["rides_bike"] is True
+
+
+def test_fast_path_annotation_shape(client):
+    uid = _register(client)
+    food_id = _seed_food()
+    _log_once(uid, food_id)
+
+    r = client.post("/api/agent/log", data={"text": "I had two rice cakes", "tz_offset": "0"})
+    assert r.status_code == 200
+    a = r.json()["annotation"]
+    assert a["meal"] in ("breakfast", "lunch", "dinner", "snack")
+    assert a["meal_label"] == "rice cake"
+    assert a["specificity"] == "medium"     # count phrasing parses at 0.5 confidence
+
+    with get_conn() as conn:
+        row = conn.execute("SELECT meal, specificity FROM capture_log WHERE user_id=?", (uid,)).fetchone()
+    assert row["meal"] == a["meal"]
+
+
+def test_fast_path_annotation_high_specificity_for_grams():
+    from app.services.agent import fast_path_annotation
+    a = fast_path_annotation("100g chicken breast", [{"food_name": "Chicken Breast"}], tz_offset=0)
+    assert a["specificity"] == "high"
+    assert a["meal_label"] == "chicken breast"
+
+
+def test_local_hour_meal_buckets(monkeypatch):
+    from app.services import agent as agent_svc
+    from datetime import datetime, timezone
+
+    class _FakeDT(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2026, 7, 9, 13, 0, tzinfo=timezone.utc)   # 13:00 UTC
+
+    monkeypatch.setattr(agent_svc, "datetime", _FakeDT)
+    assert agent_svc.local_hour_meal(0) == "lunch"          # 13:00 local
+    assert agent_svc.local_hour_meal(300) == "breakfast"    # 08:00 local (UTC-5)
+    assert agent_svc.local_hour_meal(-600) == "snack"       # 23:00 local (UTC+10)
+
+
+# ── Follow-up refinement ("say more" / "add photo" after logging) ─────────────
+
+def _first_capture_id(uid):
+    with get_conn() as conn:
+        return conn.execute(
+            "SELECT id FROM capture_log WHERE user_id=? ORDER BY id LIMIT 1", (uid,)
+        ).fetchone()["id"]
+
+
+def test_revision_updates_and_adds_entries(client, monkeypatch):
+    """Voice log first; a follow-up capture fixes the quantity and adds an item."""
+    from app.routers import agent as agent_router
+    monkeypatch.setattr(agent_router, "ANTHROPIC_API_KEY", "test-key")
+    uid = _register(client)
+    _seed_food()                                   # food 1: rice cake
+    _seed_food(name="blackberries", serving_g=None)  # food 2
+
+    # Initial log via fast path (user knows rice cakes).
+    _log_once(uid, 1)
+    r1 = client.post("/api/agent/log", data={"text": "I had two rice cakes"})
+    cap_id = r1.json()["capture_id"]
+    entry_id = r1.json()["entries"][0]["id"]
+    assert cap_id
+
+    # Follow-up: agent revises quantity and logs the berries it now sees.
+    _script_llm(monkeypatch, [
+        _tool("update_entry", {"entry_id": entry_id, "quantity_g": 45}, "t1"),
+        _tool("log_food", {"food_id": 2, "quantity_g": 100}, "t2"),
+        _text("Updated the rice cakes and added the blackberries."),
+    ])
+    r2 = client.post("/api/agent/log",
+                     data={"text": "actually it was five cakes with blackberries",
+                           "revise_capture_id": str(cap_id)})
+    assert r2.status_code == 200
+    d = r2.json()
+    assert d["revised"] is True
+    by_name = {e["food_name"]: e for e in d["entries"]}
+    assert by_name["rice cake"]["quantity_g"] == pytest.approx(45.0)
+    assert "blackberries" in by_name
+
+    # The follow-up capture row links to the original.
+    with get_conn() as conn:
+        row = conn.execute("SELECT * FROM capture_log WHERE id=?", (d["capture_id"],)).fetchone()
+    assert row["parent_capture_id"] == cap_id
+    entries = json.loads(row["entries_json"])
+    assert {e["food_name"] for e in entries} == {"rice cake", "blackberries"}
+
+    # And the live log entry really changed.
+    with get_conn() as conn:
+        q = conn.execute("SELECT quantity_g FROM log_entries WHERE id=?", (entry_id,)).fetchone()
+    assert q["quantity_g"] == pytest.approx(45.0)
+
+
+def test_revision_can_remove_entries(client, monkeypatch):
+    from app.routers import agent as agent_router
+    monkeypatch.setattr(agent_router, "ANTHROPIC_API_KEY", "test-key")
+    uid = _register(client)
+    _seed_food()
+    _log_once(uid, 1)
+    r1 = client.post("/api/agent/log", data={"text": "I had two rice cakes"})
+    cap_id = r1.json()["capture_id"]
+    entry_id = r1.json()["entries"][0]["id"]
+
+    _script_llm(monkeypatch, [
+        _tool("remove_entry", {"entry_id": entry_id}, "t1"),
+        _text("Removed it — that wasn't eaten after all."),
+    ])
+    r2 = client.post("/api/agent/log",
+                     data={"text": "scratch that, I didn't eat them",
+                           "revise_capture_id": str(cap_id)})
+    assert r2.status_code == 200
+    assert r2.json()["entries"] == []
+    with get_conn() as conn:
+        assert conn.execute("SELECT id FROM log_entries WHERE id=?", (entry_id,)).fetchone() is None
+
+
+def test_revision_rejects_foreign_capture(client, monkeypatch):
+    from app.routers import agent as agent_router
+    monkeypatch.setattr(agent_router, "ANTHROPIC_API_KEY", "test-key")
+    uid = _register(client)
+    with get_conn() as conn:
+        conn.execute("INSERT INTO users (email, password_hash, display_name) VALUES ('o@o.com','x','O')")
+        conn.execute(
+            "INSERT INTO capture_log (user_id, input_type, transcript, entries_json) VALUES (?, 'voice', 'x', '[]')",
+            (uid + 1,))
+        foreign = conn.execute("SELECT last_insert_rowid() AS i").fetchone()["i"]
+    r = client.post("/api/agent/log", data={"text": "more", "revise_capture_id": str(foreign)})
+    assert r.status_code == 404
+
+
+def test_update_entry_ownership(client):
+    uid = _register(client)
+    _seed_food()
+    e = _log_once(uid, 1)
+    from app.services.logging import update_entry_quantity, FoodNotFound
+    updated = update_entry_quantity(uid, e["id"], 50)
+    assert updated["quantity_g"] == 50
+    with pytest.raises(FoodNotFound):
+        update_entry_quantity(uid + 1, e["id"], 60)   # someone else's entry
+
+
+# ── Photo persistence (dataset material) ──────────────────────────────────────
+
+def test_photo_capture_saved_to_disk(client, scripted_agent, monkeypatch, tmp_path):
+    from app.routers import agent as agent_router
+    monkeypatch.setattr(agent_router, "ANTHROPIC_API_KEY", "test-key")
+    monkeypatch.setenv("UPLOAD_DIR", str(tmp_path))
+    uid = _register(client)
+    _seed_food()
+    scripted_agent()
+
+    r = client.post("/api/agent/log", files={"image": ("meal.png", io.BytesIO(_PNG), "image/png")})
+    assert r.status_code == 200
+    with get_conn() as conn:
+        row = conn.execute("SELECT photo_path FROM capture_log WHERE user_id=?", (uid,)).fetchone()
+    assert row["photo_path"] and row["photo_path"].endswith(".png")
+    import os
+    assert os.path.exists(row["photo_path"])
+    with open(row["photo_path"], "rb") as f:
+        assert f.read() == _PNG
+
+
+def test_account_delete_removes_photo_files(client, scripted_agent, monkeypatch, tmp_path):
+    from app.routers import agent as agent_router
+    monkeypatch.setattr(agent_router, "ANTHROPIC_API_KEY", "test-key")
+    monkeypatch.setenv("UPLOAD_DIR", str(tmp_path))
+    uid = _register(client)
+    _seed_food()
+    scripted_agent()
+    client.post("/api/agent/log", files={"image": ("meal.png", io.BytesIO(_PNG), "image/png")})
+    with get_conn() as conn:
+        path = conn.execute("SELECT photo_path FROM capture_log WHERE user_id=?", (uid,)).fetchone()["photo_path"]
+    import os
+    assert os.path.exists(path)
+
+    client.request("DELETE", "/api/auth/account", json={"password": REG["password"]})
+    assert not os.path.exists(path)
+
+
+# ── Dataset export ────────────────────────────────────────────────────────────
+
+def test_export_dataset_merges_chain_and_marks_undone(client, monkeypatch):
+    from app.routers import agent as agent_router
+    monkeypatch.setattr(agent_router, "ANTHROPIC_API_KEY", "test-key")
+    uid = _register(client)
+    _seed_food()
+    _log_once(uid, 1)
+    r1 = client.post("/api/agent/log", data={"text": "I had two rice cakes"})
+    cap_id, entry_id = r1.json()["capture_id"], r1.json()["entries"][0]["id"]
+
+    _script_llm(monkeypatch, [
+        _tool("update_entry", {"entry_id": entry_id, "quantity_g": 45}, "t1"),
+        _text("Fixed."),
+    ])
+    client.post("/api/agent/log", data={"text": "make it five", "revise_capture_id": str(cap_id)})
+
+    # The user later undoes the entry entirely → kept=false in the dataset.
+    client.delete(f"/api/log/{entry_id}")
+
+    import io as _io
+    from scripts.export_dataset import export
+    buf = _io.StringIO()
+    export(buf)
+    lines = [json.loads(l) for l in buf.getvalue().splitlines()]
+    # only root captures export (the revision is folded into its parent)
+    roots = [l for l in lines if l["capture_id"] == cap_id]
+    assert len(roots) == 1
+    ex = roots[0]
+    assert len(ex["inputs"]) == 2                      # original + follow-up
+    assert ex["inputs"][1]["text"] == "make it five"
+    assert ex["items"][0]["kept"] is False             # undone after export snapshot

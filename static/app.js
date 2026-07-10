@@ -139,7 +139,20 @@ async function showApp() {
   // Login/register responses carry only id+name; fetch the full profile
   // (email for the account pane, goals for the ring).
   try { state.user = await api.get('/api/auth/me'); } catch { /* keep what we have */ }
+  $('admin-nav-btn').classList.toggle('hidden', !(state.user && state.user.is_admin));
   await showPane('home');
+  handleLaunchAction();
+}
+
+// Home-screen shortcuts (manifest `shortcuts`, or a bookmarked /?action=…) jump
+// straight into a capture. The launch tap usually counts as the gesture the
+// mic/camera need; if the browser still blocks it, the buttons are right there.
+function handleLaunchAction() {
+  const action = new URLSearchParams(location.search).get('action');
+  if (!action) return;
+  history.replaceState({}, '', location.pathname);   // don't re-fire on refresh
+  if (action === 'voice') startVoiceCapture();
+  else if (action === 'photo') photoInput.click();
 }
 
 // ── Day navigation ────────────────────────────────────────────────────────────
@@ -376,16 +389,48 @@ $('confirm-change-btn').addEventListener('click', () => {
 });
 
 // ── Result card: what the agent just logged, with per-entry Undo/Adjust ───────
+let _lastResult = null;      // kept so an issue report can attach what just happened
+let _reviseCaptureId = null; // set when the next capture refines the previous log
+
 function showResultCard(result, photoUrl = '') {
+  _lastResult = result;
   setPolaroid($('result-photo'), photoUrl);
   $('result-summary').textContent = result.summary || '';
   const t = $('result-transcript');
   const showTranscript = !!result.transcript;
   t.textContent = showTranscript ? `“${result.transcript}”` : '';
   t.classList.toggle('hidden', !showTranscript);
+  renderResultAnnotation(result.annotation || {});
   renderResultEntries(result.entries || []);
+  // Follow-ups refine THIS capture ("say more" after a photo, photo after voice).
+  $('result-followup').classList.toggle('hidden', !result.capture_id);
   $('result-card').classList.remove('hidden');
   confirmOverlay.classList.add('hidden');
+}
+
+$('followup-voice').addEventListener('click', () => {
+  _reviseCaptureId = _lastResult && _lastResult.capture_id;
+  startVoiceCapture();
+});
+
+$('followup-photo').addEventListener('click', () => {
+  _reviseCaptureId = _lastResult && _lastResult.capture_id;
+  photoInput.click();
+});
+
+// Meal / tag chips + a gentle nudge when the capture was vague.
+function renderResultAnnotation(a) {
+  const el = $('result-annotation');
+  const chips = [];
+  if (a.meal) chips.push(a.meal);
+  if (a.meal_label && a.meal_label !== a.meal) chips.push(a.meal_label);
+  for (const tag of (a.tags || [])) chips.push(tag.replace(':', ': '));
+  let html = chips.map(c => `<span class="ann-chip">${esc(c)}</span>`).join('');
+  if (a.specificity === 'low') {
+    html += `<div class="ann-hint">Rough estimate — more detail next time ("two beef tacos from…") sharpens the numbers.</div>`;
+  }
+  el.innerHTML = html;
+  el.classList.toggle('hidden', !html);
 }
 
 function renderResultEntries(entries) {
@@ -421,6 +466,40 @@ function renderResultEntries(entries) {
 }
 
 $('result-close').addEventListener('click', () => $('result-card').classList.add('hidden'));
+
+// ── Report an issue ───────────────────────────────────────────────────────────
+let _issueContext = {};
+
+function openIssue(context = {}) {
+  _issueContext = { ...context, ua: navigator.userAgent, url: location.pathname };
+  $('issue-text').value = '';
+  $('issue-overlay').classList.remove('hidden');
+  $('issue-text').focus();
+}
+
+$('issue-close').addEventListener('click', () => $('issue-overlay').classList.add('hidden'));
+$('issue-cancel').addEventListener('click', () => $('issue-overlay').classList.add('hidden'));
+
+$('issue-send').addEventListener('click', async () => {
+  const message = $('issue-text').value.trim();
+  if (!message) { showToast('Describe the issue first.', 'error'); return; }
+  try {
+    await api.post('/api/issues/', { message, context: _issueContext });
+    $('issue-overlay').classList.add('hidden');
+    showToast('Thanks — report sent.', 'success');
+  } catch (err) {
+    showToast(err.message, 'error');
+  }
+});
+
+$('result-report').addEventListener('click', () => openIssue({
+  from: 'result-card',
+  transcript: _lastResult && _lastResult.transcript,
+  summary: _lastResult && _lastResult.summary,
+  entries: _lastResult ? (_lastResult.entries || []).map(e => `${e.food_name} ${e.quantity_g}g`) : [],
+}));
+
+$('report-issue-btn').addEventListener('click', () => openIssue({ from: 'settings' }));
 
 // Show the model's "what I saw" sentence in a banner, or hide it when empty.
 function setAiSummary(el, summary) {
@@ -758,7 +837,7 @@ async function startVoiceCapture() {
   setListening(true);
 }
 
-voiceBtn.addEventListener('click', startVoiceCapture);
+voiceBtn.addEventListener('click', () => { _reviseCaptureId = null; startVoiceCapture(); });
 
 $('voice-overlay-stop').addEventListener('click', () => {
   if (mediaRecorder && mediaRecorder.state !== 'inactive') mediaRecorder.stop();
@@ -775,6 +854,10 @@ async function submitAgentLog({ audio = null, image = null, photoUrl = '' }) {
   showVoiceMsg(audio ? 'Transcribing & logging…' : 'Analyzing & logging…');
 
   const form = new FormData();
+  form.append('tz_offset', String(new Date().getTimezoneOffset()));
+  const reviseId = _reviseCaptureId;   // one-shot: consumed by this submission
+  _reviseCaptureId = null;
+  if (reviseId) form.append('revise_capture_id', String(reviseId));
   if (audio) form.append('audio', audio, 'voice-note');
   if (image) form.append('image', image, 'meal.jpg');
 
@@ -799,7 +882,7 @@ async function submitAgentLog({ audio = null, image = null, photoUrl = '' }) {
 // ── Photo input ───────────────────────────────────────────────────────────────
 let _currentPhotoUrl = null;   // object URL of the last compressed snapshot
 
-photoBtn.addEventListener('click', () => photoInput.click());
+photoBtn.addEventListener('click', () => { _reviseCaptureId = null; photoInput.click(); });
 
 photoInput.addEventListener('change', async () => {
   const file = photoInput.files && photoInput.files[0];
@@ -861,6 +944,7 @@ function compressImage(file, maxEdge, quality) {
 const PANES = {
   home: appScreenEl, log: $('log-screen'),
   coach: $('coach-screen'), settings: $('settings-screen'),
+  admin: $('admin-screen'),
 };
 
 async function showPane(name) {
@@ -882,6 +966,8 @@ async function showPane(name) {
     prefillGoals();
     renderAccount();
     initReminders();
+  } else if (name === 'admin') {
+    await loadAdmin();
   }
 }
 
@@ -925,9 +1011,121 @@ function leaveApp() {
   state.user = null;
   _coachLoaded = false;
   $('coach-messages').innerHTML = '';
+  $('admin-nav-btn').classList.add('hidden');
   Object.values(PANES).forEach(el => el.classList.add('hidden'));
   $('topnav').classList.add('hidden');
   authScreen.classList.remove('hidden');
+}
+
+// ── Admin: production usage & evaluation dashboard (maintainer only) ──────────
+async function loadAdmin() {
+  try {
+    const [s, f, tr, is_, er] = await Promise.all([
+      api.get('/api/admin/stats?days=14'),
+      api.get('/api/admin/failures?days=14'),
+      api.get('/api/admin/traces?limit=30'),
+      api.get('/api/admin/issues?limit=30'),
+      api.get('/api/admin/errors?limit=30'),
+    ]);
+    renderAdmin(s, f.failures);
+    renderAdminTelemetry(tr.traces, is_.issues, er.errors);
+  } catch (err) {
+    showToast(err.message, 'error');
+  }
+}
+
+function renderAdminTelemetry(traces, issues, errors) {
+  $('admin-issues').innerHTML = issues.length ? issues.map(i => {
+    let ctx = {};
+    try { ctx = JSON.parse(i.context_json || '{}'); } catch { /* show raw below */ }
+    const detail = [ctx.transcript && `said: “${ctx.transcript}”`, ctx.summary && `agent: ${ctx.summary}`]
+      .filter(Boolean).join(' · ');
+    return `<div class="fail-item">
+      <div class="fail-meta">${esc(i.display_name)} · ${esc(i.created_at.slice(0, 16))}</div>
+      <div class="fail-transcript">${esc(i.message)}</div>
+      ${detail ? `<div class="fail-summary">${esc(detail)}</div>` : ''}
+    </div>`;
+  }).join('') : '<p class="empty-state">No reports.</p>';
+
+  $('admin-traces').innerHTML = traces.length ? traces.map(t => {
+    let resp = {};
+    try { resp = JSON.parse(t.response_json || '{}'); } catch { /* leave empty */ }
+    const tokens = `${(t.input_tokens || 0).toLocaleString()}→${(t.output_tokens || 0).toLocaleString()}`;
+    const status = t.error ? 'ERROR' : (t.stop_reason || '');
+    const calls = (resp.tool_calls || []).map(c => c.name).join(', ');
+    return `<details class="trace-item${t.error ? ' trace-error' : ''}">
+      <summary>
+        <span class="trace-when">${esc(t.created_at.slice(5, 16))}</span>
+        <span class="trace-who">${esc(t.display_name || '—')}</span>
+        <span class="trace-what">${esc(t.feature)} · ${esc(t.model)}</span>
+        <span class="trace-nums">${t.latency_ms ?? '—'}ms · ${tokens} tok · ${esc(status)}</span>
+      </summary>
+      ${t.error ? `<pre class="trace-pre">${esc(t.error)}</pre>` : ''}
+      ${calls ? `<div class="fail-summary">tools: ${esc(calls)}</div>` : ''}
+      ${resp.text ? `<pre class="trace-pre">${esc(resp.text)}</pre>` : ''}
+      ${(resp.tool_calls || []).length ? `<pre class="trace-pre">${esc(JSON.stringify(resp.tool_calls, null, 1))}</pre>` : ''}
+    </details>`;
+  }).join('') : '<p class="empty-state">No model calls traced yet.</p>';
+
+  $('admin-errors').innerHTML = errors.length ? errors.map(e => `
+    <div class="fail-item">
+      <div class="fail-meta">${esc(e.created_at.slice(0, 16))} · ${esc(e.method || '')} ${esc(e.path || '')}</div>
+      <div class="fail-summary">${esc(e.error || '')}</div>
+    </div>`).join('') : '<p class="empty-state">No unhandled errors. Nice.</p>';
+}
+
+function renderAdmin(s, failures) {
+  const t = s.totals;
+  $('admin-tiles').innerHTML = [
+    [t.captures, 'captures'],
+    [t.active_users, 'active users'],
+    [`${t.fast_path_pct}%`, 'fast path'],
+    [`${t.zero_entry_pct}%`, 'logged nothing'],
+    [t.coach_messages, 'coach msgs'],
+    [`$${t.est_cost_usd}`, 'est. AI cost'],
+  ].map(([val, label]) =>
+    `<div class="stat-cell"><div class="stat-val">${esc(String(val))}</div><div class="stat-label">${label}</div></div>`
+  ).join('');
+
+  // Captures per day — single-series bars, same anatomy as the calories chart.
+  const daily = s.daily;
+  const max = Math.max(...daily.map(d => d.captures), 1);
+  const step = daily.length > 8 ? 2 : 1;
+  $('admin-chart').innerHTML = daily.length ? daily.map((d, i) => {
+    const label = (i % step === 0) ? d.day.slice(5).replace('-', '/') : '';
+    return `<div class="bar-col" title="${d.day}: ${d.captures} captures (${d.voice} voice, ${d.photo} photo, ${d.text} text)">
+      <div class="bar-wrap"><div class="bar" style="height:${(d.captures / max) * 100}%"></div></div>
+      <span class="bar-label">${label}</span>
+    </div>`;
+  }).join('') : '<p class="empty-state">No captures yet.</p>';
+  const tv = daily.reduce((a, d) => ({ v: a.v + d.voice, p: a.p + d.photo, t: a.t + d.text }), { v: 0, p: 0, t: 0 });
+  $('admin-chart-caption').textContent =
+    daily.length ? `${tv.v} voice · ${tv.p} photo · ${tv.t} text` : '';
+
+  // Grounding mix — labeled magnitude meters, one hue.
+  const totalEntries = s.entry_sources.reduce((a, r) => a + r.n, 0) || 1;
+  $('admin-sources').innerHTML = s.entry_sources.length ? s.entry_sources.map(r => `
+    <div class="gp-row">
+      <div class="gp-head"><span class="gp-label">${esc(foodSourceLabel(r.source) || r.source)}</span>
+        <span class="gp-vals">${r.n} (${Math.round(100 * r.n / totalEntries)}%)</span></div>
+      <div class="gp-track"><div class="gp-fill" style="width:${(r.n / totalEntries) * 100}%"></div></div>
+    </div>`).join('') : '<p class="empty-state">No entries yet.</p>';
+
+  $('admin-users').innerHTML =
+    '<tr><th>User</th><th>Joined</th><th>Last active</th><th>Captures</th><th>Entries</th><th>Tokens</th></tr>' +
+    s.per_user.map(u => `<tr>
+      <td>${esc(u.display_name)}</td>
+      <td>${esc(u.joined || '')}</td>
+      <td>${u.last_capture ? esc(u.last_capture.slice(0, 10)) : '—'}</td>
+      <td>${u.captures}</td><td>${u.entries}</td><td>${(u.tokens || 0).toLocaleString()}</td>
+    </tr>`).join('');
+
+  $('admin-failures').innerHTML = failures.length ? failures.map(f => `
+    <div class="fail-item">
+      <div class="fail-meta">${esc(f.display_name)} · ${esc(f.input_type)} · ${esc(f.created_at.slice(0, 16))}</div>
+      ${f.transcript ? `<div class="fail-transcript">“${esc(f.transcript)}”</div>` : '<div class="fail-transcript">(photo — no transcript)</div>'}
+      ${f.summary ? `<div class="fail-summary">${esc(f.summary)}</div>` : ''}
+    </div>`).join('') : '<p class="empty-state">No failed captures. Nice.</p>';
 }
 
 // ── Coach: on-demand chat over the user's own logs, notes, goals & profile ────
