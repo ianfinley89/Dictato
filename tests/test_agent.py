@@ -670,6 +670,97 @@ def test_revision_blocks_duplicate_relog(client, monkeypatch):
     # photo follow-up keeps the original words visible
     assert d["transcript"] == "I had two rice cakes"
 
+
+# ── Audio persistence (dataset material + STT-failure replay) ─────────────────
+
+def _fake_transcribe(text):
+    async def f(blob):
+        return text
+    return f
+
+
+def test_voice_capture_audio_saved_to_disk(client, monkeypatch, tmp_path):
+    import os
+    from app.routers import agent as agent_router
+    monkeypatch.setenv("UPLOAD_DIR", str(tmp_path))
+    monkeypatch.setattr(agent_router.stt, "transcribe", _fake_transcribe("I had two rice cakes"))
+    uid = _register(client)
+    _log_once(uid, _seed_food())
+
+    r = client.post("/api/agent/log",
+                    files={"audio": ("a.webm", io.BytesIO(b"opusdata"), "audio/webm")})
+    assert r.status_code == 200
+    with get_conn() as conn:
+        row = conn.execute("SELECT audio_path FROM capture_log WHERE user_id=?", (uid,)).fetchone()
+    assert row["audio_path"] and row["audio_path"].endswith(".webm")
+    assert os.path.exists(row["audio_path"])
+    with open(row["audio_path"], "rb") as f:
+        assert f.read() == b"opusdata"
+
+
+def test_no_speech_records_failed_capture_with_audio(client, monkeypatch, tmp_path):
+    """A silent recording (the Whisper-hallucination case) 422s to the user but
+    keeps the audio + a capture row so the failure can be replayed later."""
+    import os
+    from app.routers import agent as agent_router
+    monkeypatch.setenv("UPLOAD_DIR", str(tmp_path))
+    monkeypatch.setattr(agent_router.stt, "transcribe", _fake_transcribe(""))
+    uid = _register(client)
+
+    r = client.post("/api/agent/log",
+                    files={"audio": ("a.mp4", io.BytesIO(b"nearsilence"), "audio/mp4")})
+    assert r.status_code == 422
+    with get_conn() as conn:
+        row = conn.execute("SELECT * FROM capture_log WHERE user_id=?", (uid,)).fetchone()
+    assert row["summary"] == "(no speech detected)"
+    assert row["transcript"] is None
+    assert json.loads(row["entries_json"]) == []
+    assert row["audio_path"].endswith(".m4a")
+    assert os.path.exists(row["audio_path"])
+
+
+def test_account_delete_removes_audio_files(client, monkeypatch, tmp_path):
+    import os
+    from app.routers import agent as agent_router
+    monkeypatch.setenv("UPLOAD_DIR", str(tmp_path))
+    monkeypatch.setattr(agent_router.stt, "transcribe", _fake_transcribe("I had two rice cakes"))
+    uid = _register(client)
+    _log_once(uid, _seed_food())
+    client.post("/api/agent/log", files={"audio": ("a.webm", io.BytesIO(b"x"), "audio/webm")})
+    with get_conn() as conn:
+        path = conn.execute("SELECT audio_path FROM capture_log WHERE user_id=?",
+                            (uid,)).fetchone()["audio_path"]
+    assert os.path.exists(path)
+
+    client.request("DELETE", "/api/auth/account", json={"password": REG["password"]})
+    assert not os.path.exists(path)
+
+
+def test_export_dataset_includes_audio_and_issue_reports(client, monkeypatch, tmp_path):
+    """A 'model'-category issue filed against a capture rides along in the
+    export — the user's complaint is a label for that example."""
+    from app.routers import agent as agent_router
+    monkeypatch.setenv("UPLOAD_DIR", str(tmp_path))
+    monkeypatch.setattr(agent_router.stt, "transcribe", _fake_transcribe("I had two rice cakes"))
+    uid = _register(client)
+    _log_once(uid, _seed_food())
+    r1 = client.post("/api/agent/log", files={"audio": ("a.webm", io.BytesIO(b"x"), "audio/webm")})
+    cap_id = r1.json()["capture_id"]
+
+    async def fake_triage(message, context=None, user_id=None):
+        return "model"
+    monkeypatch.setattr("app.services.triage.classify_issue", fake_triage)
+    client.post("/api/issues/", json={"message": "wrong portion", "capture_id": cap_id})
+
+    import io as _io
+    from scripts.export_dataset import export
+    buf = _io.StringIO()
+    export(buf)
+    ex = next(json.loads(l) for l in buf.getvalue().splitlines()
+              if json.loads(l)["capture_id"] == cap_id)
+    assert ex["inputs"][0]["audio"].endswith(".webm")
+    assert ex["issues"] == [{"category": "model", "message": "wrong portion"}]
+
     with get_conn() as conn:
         n = conn.execute("SELECT COUNT(*) c FROM log_entries WHERE user_id=?", (uid,)).fetchone()["c"]
     assert n == 2   # the _log_once seed + the capture's entry — no third (duplicate) row

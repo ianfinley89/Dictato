@@ -4,10 +4,14 @@ Each line is one capture chain (an original capture plus its "say more" /
 "add photo" follow-ups), labeled with the FINAL human-verified state:
 entries the user kept (with their corrected quantities from the live log)
 and entries they undid (kept=false — a negative signal worth training on).
+Issue reports filed against a capture ride along under "issues" — a 'model'
+report marks the example as a known miss, a 'capture' report flags its audio
+for the STT eval set.
 
     uv run python scripts/export_dataset.py [out.jsonl]
 
-Photos are referenced by path (files live under UPLOAD_DIR/captures/).
+Photos and voice recordings are referenced by path (files live under
+UPLOAD_DIR/captures/).
 """
 import json
 import sys
@@ -54,7 +58,7 @@ def export(out=sys.stdout) -> int:
                 "created_at": root["created_at"],
                 "inputs": [
                     {"type": c["input_type"], "text": c["transcript"],
-                     "image": c["photo_path"]}
+                     "image": c["photo_path"], "audio": c["audio_path"]}
                     for c in chain
                 ],
                 "meal": last["meal"] or root["meal"],
@@ -64,6 +68,15 @@ def export(out=sys.stdout) -> int:
                 "items": [_entry_label(conn, s)
                           for s in json.loads(last["entries_json"] or "[]")],
             }
+            chain_ids = [c["id"] for c in chain]
+            issue_rows = conn.execute(
+                f"""SELECT category, message FROM issue_reports
+                    WHERE capture_id IN ({','.join('?' * len(chain_ids))})""",
+                chain_ids,
+            ).fetchall()
+            if issue_rows:
+                example["issues"] = [{"category": r["category"], "message": r["message"]}
+                                     for r in issue_rows]
             out.write(json.dumps(example, ensure_ascii=False) + "\n")
             n += 1
     return n

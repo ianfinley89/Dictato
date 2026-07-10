@@ -4,6 +4,9 @@ import json
 import pytest
 
 from app.database import get_conn
+# Bound at import time, before the autouse no_live_triage fixture patches the
+# module attribute — this is the REAL function, for unit-testing triage itself.
+from app.services.triage import classify_issue as _real_classify_issue
 
 ADMIN = {"email": "boss@example.com", "password": "password123", "display_name": "Boss"}
 FRIEND = {"email": "friend@example.com", "password": "password123", "display_name": "Friend"}
@@ -106,6 +109,104 @@ def test_issue_report_rejects_empty(client):
 
 def test_issue_report_requires_auth(client):
     assert client.post("/api/issues/", json={"message": "hi"}).status_code == 401
+
+
+# ── Issue triage pipeline (auto-categorize → route to the right queue) ────────
+
+def test_issue_autotriage_stores_category(client, monkeypatch):
+    async def fake(message, context=None, user_id=None):
+        return "infra"
+    monkeypatch.setattr("app.services.triage.classify_issue", fake)
+    client.post("/api/auth/register", json=FRIEND)
+    r = client.post("/api/issues/", json={"message": "the goals setting won't save"})
+    assert r.status_code == 200
+    assert r.json()["category"] == "infra"
+
+    client.post("/api/auth/logout", json={})
+    client.post("/api/auth/register", json=ADMIN)
+    issues = client.get("/api/admin/issues").json()["issues"]
+    assert issues[0]["category"] == "infra"
+
+
+def test_issue_links_own_capture_but_drops_foreign(client, monkeypatch):
+    client.post("/api/auth/register", json=ADMIN)      # someone else's capture
+    _seed_capture(_uid(ADMIN["email"]))
+    client.post("/api/auth/logout", json={})
+    client.post("/api/auth/register", json=FRIEND)
+    _seed_capture(_uid(FRIEND["email"]))
+    with get_conn() as conn:
+        admin_cap, friend_cap = [r["id"] for r in
+                                 conn.execute("SELECT id FROM capture_log ORDER BY id")]
+
+    client.post("/api/issues/", json={"message": "mine", "capture_id": friend_cap})
+    client.post("/api/issues/", json={"message": "not mine", "capture_id": admin_cap})
+    with get_conn() as conn:
+        rows = conn.execute("SELECT message, capture_id FROM issue_reports ORDER BY id").fetchall()
+    assert rows[0]["capture_id"] == friend_cap
+    assert rows[1]["capture_id"] is None               # foreign link silently dropped
+
+
+def test_issue_daily_cap(client):
+    client.post("/api/auth/register", json=FRIEND)
+    uid = _uid(FRIEND["email"])
+    with get_conn() as conn:
+        conn.executemany(
+            "INSERT INTO issue_reports (user_id, message) VALUES (?,?)",
+            [(uid, f"report {i}") for i in range(20)],
+        )
+    assert client.post("/api/issues/", json={"message": "one more"}).status_code == 429
+
+
+def test_admin_relabels_issue_category(client):
+    client.post("/api/auth/register", json=FRIEND)
+    client.post("/api/issues/", json={"message": "hm"})   # triage stubbed → NULL
+    client.post("/api/auth/logout", json={})
+    client.post("/api/auth/register", json=ADMIN)
+
+    issue_id = client.get("/api/admin/issues").json()["issues"][0]["id"]
+    r = client.post(f"/api/admin/issues/{issue_id}/category", json={"category": "model"})
+    assert r.status_code == 200
+    assert client.get("/api/admin/issues").json()["issues"][0]["category"] == "model"
+
+    assert client.post(f"/api/admin/issues/{issue_id}/category",
+                       json={"category": "bogus"}).status_code == 400
+    assert client.post("/api/admin/issues/99999/category",
+                       json={"category": "infra"}).status_code == 404
+
+
+def test_relabel_requires_admin(client):
+    client.post("/api/auth/register", json=FRIEND)
+    r = client.post("/api/admin/issues/1/category", json={"category": "infra"})
+    assert r.status_code == 403
+
+
+def test_classify_issue_parses_model_reply(monkeypatch):
+    """The real triage function (unit level): category word extracted from the
+    reply; junk replies → None; context lines make it into the prompt."""
+    import asyncio
+
+    sent = {}
+
+    def fake_chat_returning(text):
+        async def fake_chat(**kw):
+            sent.update(kw)
+            from app.services.llm import LLMResponse
+            return LLMResponse(text=text, tool_calls=[], stop_reason="end",
+                               input_tokens=1, output_tokens=1)
+        return fake_chat
+
+    monkeypatch.setattr("app.services.llm.chat", fake_chat_returning("capture"))
+    got = asyncio.run(_real_classify_issue("it only heard 'thank you'",
+                                           {"transcript": "thank you"}, user_id=1))
+    assert got == "capture"
+    assert "thank you" in sent["messages"][0]["text"]
+    assert sent["feature"] == "issue_triage"
+
+    monkeypatch.setattr("app.services.llm.chat", fake_chat_returning("Category: model."))
+    assert asyncio.run(_real_classify_issue("wrong wings", None)) == "model"
+
+    monkeypatch.setattr("app.services.llm.chat", fake_chat_returning("no idea, sorry"))
+    assert asyncio.run(_real_classify_issue("???", None)) is None
 
 
 # ── Model traces ──────────────────────────────────────────────────────────────

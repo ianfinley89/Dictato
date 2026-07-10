@@ -484,7 +484,11 @@ $('issue-send').addEventListener('click', async () => {
   const message = $('issue-text').value.trim();
   if (!message) { showToast('Describe the issue first.', 'error'); return; }
   try {
-    await api.post('/api/issues/', { message, context: _issueContext });
+    await api.post('/api/issues/', {
+      message,
+      context: _issueContext,
+      capture_id: _issueContext.capture_id || null,
+    });
     $('issue-overlay').classList.add('hidden');
     showToast('Thanks — report sent.', 'success');
   } catch (err) {
@@ -494,6 +498,7 @@ $('issue-send').addEventListener('click', async () => {
 
 $('result-report').addEventListener('click', () => openIssue({
   from: 'result-card',
+  capture_id: _lastResult && _lastResult.capture_id,
   transcript: _lastResult && _lastResult.transcript,
   summary: _lastResult && _lastResult.summary,
   entries: _lastResult ? (_lastResult.entries || []).map(e => `${e.food_name} ${e.quantity_g}g`) : [],
@@ -616,7 +621,9 @@ async function adjustEntry(entryId, foodId, qty) {
 
 function renderLog() {
   if (!state.dayLog.length) {
-    logList.innerHTML = '<p class="empty-state">Nothing logged yet.<br>Say it, snap it, or add it manually.</p>';
+    logList.innerHTML = `<div class="empty-state">Nothing logged yet.<br>Say it, snap it, or add it manually.
+      <button id="log-empty-home" class="btn-secondary" type="button">Back to Home</button></div>`;
+    $('log-empty-home').addEventListener('click', () => showPane('home'));
     return;
   }
 
@@ -801,7 +808,13 @@ async function startVoiceCapture() {
 
   let stream;
   try {
-    stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    // Ask for mic processing explicitly: autoGainControl in particular rescues
+    // quiet phone mics that otherwise record near-silence (which Whisper then
+    // hallucinates into "thank you" / "bye bye"). These are ideal-constraints,
+    // so browsers that can't honor them still return a stream.
+    stream = await navigator.mediaDevices.getUserMedia({
+      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+    });
   } catch {
     showVoiceMsg('Microphone is blocked. Allow mic access for this site in your browser settings.', 8000);
     return;
@@ -1034,18 +1047,35 @@ async function loadAdmin() {
   }
 }
 
+// Where each report routes: infra → fix the code, model → training-dataset
+// candidate, capture → mic/photo/STT pipeline. Auto-triaged; relabel here.
+const ISSUE_CATS = { infra: 'infrastructure', model: 'model → dataset', capture: 'capture / device', other: 'other' };
+
 function renderAdminTelemetry(traces, issues, errors) {
   $('admin-issues').innerHTML = issues.length ? issues.map(i => {
     let ctx = {};
     try { ctx = JSON.parse(i.context_json || '{}'); } catch { /* show raw below */ }
     const detail = [ctx.transcript && `said: “${ctx.transcript}”`, ctx.summary && `agent: ${ctx.summary}`]
       .filter(Boolean).join(' · ');
+    const opts = ['', ...Object.keys(ISSUE_CATS)].map(c =>
+      `<option value="${c}"${(i.category || '') === c ? ' selected' : ''}>${c ? ISSUE_CATS[c] : 'unsorted'}</option>`).join('');
     return `<div class="fail-item">
-      <div class="fail-meta">${esc(i.display_name)} · ${esc(i.created_at.slice(0, 16))}</div>
+      <div class="fail-meta">${esc(i.display_name)} · ${esc(i.created_at.slice(0, 16))}${i.capture_id ? ` · capture #${i.capture_id}` : ''}
+        <select class="issue-cat" data-id="${i.id}" title="Route this report">${opts}</select>
+      </div>
       <div class="fail-transcript">${esc(i.message)}</div>
       ${detail ? `<div class="fail-summary">${esc(detail)}</div>` : ''}
     </div>`;
   }).join('') : '<p class="empty-state">No reports.</p>';
+
+  $('admin-issues').querySelectorAll('.issue-cat').forEach(sel => {
+    sel.addEventListener('change', async () => {
+      try {
+        await api.post(`/api/admin/issues/${sel.dataset.id}/category`, { category: sel.value || null });
+        showToast('Report re-routed.', 'success');
+      } catch (err) { showToast(err.message, 'error'); }
+    });
+  });
 
   $('admin-traces').innerHTML = traces.length ? traces.map(t => {
     let resp = {};

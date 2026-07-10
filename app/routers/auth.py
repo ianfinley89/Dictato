@@ -80,9 +80,9 @@ async def delete_account(req: DeleteAccountRequest, request: Request, response: 
         if not row or not verify_password(req.password, row["password_hash"]):
             raise HTTPException(403, "Incorrect password")
 
-        photo_paths = [r["photo_path"] for r in conn.execute(
-            "SELECT photo_path FROM capture_log WHERE user_id=? AND photo_path IS NOT NULL", (uid,)
-        )]
+        media_paths = [p for r in conn.execute(
+            "SELECT photo_path, audio_path FROM capture_log WHERE user_id=?", (uid,)
+        ) for p in (r["photo_path"], r["audio_path"]) if p]
 
         conn.execute("DELETE FROM log_entries WHERE user_id=?", (uid,))
         conn.execute("DELETE FROM favorites WHERE user_id=?", (uid,))
@@ -110,9 +110,9 @@ async def delete_account(req: DeleteAccountRequest, request: Request, response: 
         conn.execute("UPDATE foods SET created_by_user_id=NULL WHERE created_by_user_id=?", (uid,))
         conn.execute("DELETE FROM users WHERE id=?", (uid,))
 
-    # Stored capture photos go with the account (best-effort; rows already gone).
+    # Stored capture photos/recordings go with the account (best-effort; rows already gone).
     import os
-    for p in photo_paths:
+    for p in media_paths:
         try:
             os.remove(p)
         except OSError:

@@ -28,7 +28,8 @@ _CAPTURE_ENTRY_KEYS = (
 
 
 def _record_capture(uid, input_type, transcript, summary, entries, fast_path,
-                    annotation=None, photo_path=None, parent_capture_id=None):
+                    annotation=None, photo_path=None, audio_path=None,
+                    parent_capture_id=None):
     """Persist every capture verbatim for later analysis / coaching / datasets.
     Best-effort: a logging failure must never break the actual food logging."""
     try:
@@ -38,11 +39,12 @@ def _record_capture(uid, input_type, transcript, summary, entries, fast_path,
             cur = conn.execute(
                 """INSERT INTO capture_log
                    (user_id, input_type, transcript, summary, entries_json, fast_path,
-                    meal, meal_label, tags_json, specificity, photo_path, parent_capture_id)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    meal, meal_label, tags_json, specificity, photo_path, audio_path,
+                    parent_capture_id)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (uid, input_type, transcript, summary, json.dumps(slim), 1 if fast_path else 0,
                  a.get("meal"), a.get("meal_label"), json.dumps(a.get("tags") or []),
-                 a.get("specificity"), photo_path, parent_capture_id),
+                 a.get("specificity"), photo_path, audio_path, parent_capture_id),
             )
             return cur.lastrowid
     except Exception:
@@ -60,6 +62,28 @@ def _save_capture_photo(image_bytes: bytes, image_type: str) -> str | None:
         path = os.path.join(d, f"{uuid.uuid4().hex}.{ext}")
         with open(path, "wb") as f:
             f.write(image_bytes)
+        return path
+    except Exception:
+        return None
+
+
+_AUDIO_EXT = {"audio/webm": "webm", "audio/mp4": "m4a", "audio/mpeg": "mp3",
+              "audio/ogg": "ogg", "audio/wav": "wav"}
+
+
+def _save_capture_audio(audio_bytes: bytes, content_type: str | None) -> str | None:
+    """Keep the raw voice note on disk — the audio half of the voice→label
+    training pairs, and the only way to replay an STT failure (e.g. a phone
+    mic recording near-silence). Same lifecycle as photos: outside the web
+    root, deleted with the account. Best-effort."""
+    try:
+        base = (content_type or "").split(";")[0].strip().lower()
+        ext = _AUDIO_EXT.get(base, "webm")
+        d = os.path.join(os.getenv("UPLOAD_DIR", "uploads"), "captures", "audio")
+        os.makedirs(d, exist_ok=True)
+        path = os.path.join(d, f"{uuid.uuid4().hex}.{ext}")
+        with open(path, "wb") as f:
+            f.write(audio_bytes)
         return path
     except Exception:
         return None
@@ -94,17 +118,26 @@ async def agent_log(
         method = "photo"
         input_type = "photo"
 
+    audio_path = None
     if audio is not None:
         blob = await audio.read()
         if not blob:
             raise HTTPException(400, "Empty audio upload")
         if len(blob) > _AUDIO_MAX:
             raise HTTPException(413, "Recording too long.")
+        audio_path = _save_capture_audio(blob, audio.content_type)
+        # STT failures still get a capture row (with the audio attached): a mic
+        # that records near-silence is exactly the failure we want to replay
+        # later, not one that vanishes into a 422.
         try:
             transcript = await stt.transcribe(blob)
         except Exception:
+            _record_capture(uid, "voice", None, "(couldn't decode the audio)", [],
+                            fast_path=False, audio_path=audio_path)
             raise HTTPException(422, "Couldn't decode the audio recording. Try again.")
         if not transcript:
+            _record_capture(uid, "voice", None, "(no speech detected)", [],
+                            fast_path=False, audio_path=audio_path)
             raise HTTPException(422, "Didn't catch any speech — try again.")
         input_type = "voice"
 
@@ -139,7 +172,8 @@ async def agent_log(
             summary = f"Logged {names}."
             annotation = agent.fast_path_annotation(transcript, entries, tz_offset)
             capture_id = _record_capture(uid, input_type, transcript, summary, entries,
-                                         fast_path=True, annotation=annotation)
+                                         fast_path=True, annotation=annotation,
+                                         audio_path=audio_path)
             return {"capture_id": capture_id, "transcript": transcript, "summary": summary,
                     "entries": entries, "annotation": annotation, "fast_path": True}
 
@@ -162,7 +196,8 @@ async def agent_log(
         entries = current_entries(uid, all_ids)
         capture_id = _record_capture(uid, input_type, transcript, result["summary"], entries,
                                      fast_path=False, annotation=result.get("annotation"),
-                                     photo_path=photo_path, parent_capture_id=revise_capture_id)
+                                     photo_path=photo_path, audio_path=audio_path,
+                                     parent_capture_id=revise_capture_id)
         # A photo follow-up has no words of its own — keep showing the original
         # transcript so the context reads as appended, not replaced.
         return {"capture_id": capture_id,
@@ -173,7 +208,7 @@ async def agent_log(
 
     capture_id = _record_capture(uid, input_type, transcript, result["summary"], result["entries"],
                                  fast_path=False, annotation=result.get("annotation"),
-                                 photo_path=photo_path)
+                                 photo_path=photo_path, audio_path=audio_path)
     return {"capture_id": capture_id, "transcript": transcript, "summary": result["summary"],
             "entries": result["entries"], "annotation": result.get("annotation") or {},
             "fast_path": False}

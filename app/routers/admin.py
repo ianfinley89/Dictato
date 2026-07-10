@@ -14,10 +14,12 @@ Access is limited to ADMIN_EMAILS (comma-separated env var).
 import json
 
 from fastapi import APIRouter, Request, HTTPException, Query
+from pydantic import BaseModel
 
 from app.auth import get_current_user_id
 from app.config import ADMIN_EMAILS
 from app.database import get_conn
+from app.services.triage import CATEGORIES
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
 
@@ -143,12 +145,31 @@ async def issues(request: Request, limit: int = Query(50, ge=1, le=200)):
     _require_admin(request)
     with get_conn() as conn:
         rows = conn.execute(
-            """SELECT i.id, i.created_at, i.message, i.context_json, u.display_name
+            """SELECT i.id, i.created_at, i.message, i.context_json, i.category,
+                      i.capture_id, u.display_name
                FROM issue_reports i JOIN users u ON u.id = i.user_id
                ORDER BY i.id DESC LIMIT ?""",
             (limit,),
         ).fetchall()
     return {"issues": [dict(r) for r in rows]}
+
+
+class CategorySet(BaseModel):
+    category: str | None = None   # None/'' clears back to unsorted
+
+
+@router.post("/issues/{issue_id}/category")
+async def set_issue_category(request: Request, issue_id: int, body: CategorySet):
+    """Relabel a report when auto-triage got it wrong (or couldn't run)."""
+    _require_admin(request)
+    cat = body.category or None
+    if cat is not None and cat not in CATEGORIES:
+        raise HTTPException(400, f"category must be one of {', '.join(CATEGORIES)}")
+    with get_conn() as conn:
+        cur = conn.execute("UPDATE issue_reports SET category=? WHERE id=?", (cat, issue_id))
+        if cur.rowcount == 0:
+            raise HTTPException(404, "No such report")
+    return {"ok": True}
 
 
 @router.get("/errors")

@@ -20,6 +20,16 @@ def isolated_db(tmp_path, monkeypatch):
     yield
 
 
+@pytest.fixture(autouse=True)
+def no_live_triage(monkeypatch):
+    """Issue reports auto-triage through a real model call in production; the
+    developer's .env (real API key) is loaded here, so stub it out by default.
+    Tests that exercise triage behavior re-patch app.services.triage."""
+    async def _stub(message, context=None, user_id=None):
+        return None
+    monkeypatch.setattr("app.services.triage.classify_issue", _stub)
+
+
 @pytest.fixture()
 def client():
     """Fresh TestClient (and therefore fresh cookie jar) for each test."""

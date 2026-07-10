@@ -137,6 +137,7 @@ CREATE TABLE IF NOT EXISTS capture_log (
     tags_json TEXT,                    -- ["activity:cycling", "restaurant:taco-bell", ...]
     specificity TEXT,                  -- low | medium | high — how precise the user was
     photo_path TEXT,                   -- saved capture photo (dataset material; deleted with account)
+    audio_path TEXT,                   -- saved voice note (dataset material + STT-failure replay; deleted with account)
     parent_capture_id INTEGER          -- set on follow-up refinements ("say more" / "add photo")
 );
 
@@ -176,12 +177,17 @@ CREATE TABLE IF NOT EXISTS model_traces (
 );
 
 -- User-filed issue reports, with whatever context the app auto-attached.
+-- Each report is auto-triaged into a pipeline: 'infra' bugs are code fixes,
+-- 'model' reports are training-dataset candidates (the AI mis-handled food),
+-- 'capture' means the mic/photo/transcription failed the user.
 CREATE TABLE IF NOT EXISTS issue_reports (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id INTEGER NOT NULL REFERENCES users(id),
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     message TEXT NOT NULL,
-    context_json TEXT
+    context_json TEXT,
+    category TEXT,                     -- 'infra' | 'model' | 'capture' | 'other' | NULL (admin can relabel)
+    capture_id INTEGER                 -- links the report to the capture it's about
 );
 
 -- Unhandled server errors (the "normal software" telemetry).
@@ -250,11 +256,17 @@ def _migrate(conn) -> None:
         conn.execute("ALTER TABLE reminders ADD COLUMN last_fired TEXT")
 
     cap_cols = {r["name"] for r in conn.execute("PRAGMA table_info(capture_log)")}
-    for col in ("meal", "meal_label", "tags_json", "specificity", "photo_path"):
+    for col in ("meal", "meal_label", "tags_json", "specificity", "photo_path", "audio_path"):
         if col not in cap_cols:
             conn.execute(f"ALTER TABLE capture_log ADD COLUMN {col} TEXT")
     if "parent_capture_id" not in cap_cols:
         conn.execute("ALTER TABLE capture_log ADD COLUMN parent_capture_id INTEGER")
+
+    iss_cols = {r["name"] for r in conn.execute("PRAGMA table_info(issue_reports)")}
+    if "category" not in iss_cols:
+        conn.execute("ALTER TABLE issue_reports ADD COLUMN category TEXT")
+    if "capture_id" not in iss_cols:
+        conn.execute("ALTER TABLE issue_reports ADD COLUMN capture_id INTEGER")
 
 
 def _backfill_serving_g(conn) -> None:
