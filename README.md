@@ -141,7 +141,16 @@ See [BUILD_PLAN.md](BUILD_PLAN.md).
 
 ## Deployment (home PC + Cloudflare Tunnel)
 
-1. Install [cloudflared](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/).
-2. `cloudflared tunnel create dictato`
-3. Point the tunnel to `localhost:8000`.
-4. Set `SECURE_COOKIES=true` in `.env` and restart uvicorn.
+Permanent HTTPS URL (**https://dictato.levelup-ai.com**) from the home PC, no
+open ports, home IP hidden — via a named Cloudflare Tunnel. Full step-by-step
+(DNS move, tunnel setup, auto-start on reboot, and how to reverse it) in
+**[HOSTING.md](HOSTING.md)**; the tunnel config template is
+[deploy/cloudflared/config.example.yml](deploy/cloudflared/config.example.yml).
+
+Short version:
+
+1. Move `levelup-ai.com`'s **nameservers** (not the registration) to Cloudflare.
+2. `cloudflared tunnel create dictato`, add the config, then
+   `cloudflared tunnel route dns dictato dictato.levelup-ai.com`.
+3. Install cloudflared + the app as services so they survive reboots.
+4. Set `SECURE_COOKIES=true` in `.env`.

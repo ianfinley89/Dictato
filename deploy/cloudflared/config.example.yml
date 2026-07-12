@@ -1,0 +1,19 @@
+# Named Cloudflare Tunnel config for Dictato.
+#
+# Copy to  %USERPROFILE%\.cloudflared\config.yml  on the host PC and replace
+# <TUNNEL-UUID> with the id printed by `cloudflared tunnel create dictato`.
+# Full walkthrough: ../../HOSTING.md
+#
+# The credentials JSON is a SECRET — it lives in %USERPROFILE%\.cloudflared\,
+# never in this repo.
+
+tunnel: dictato
+credentials-file: C:\Users\ianfi\.cloudflared\<TUNNEL-UUID>.json
+
+ingress:
+  # Public hostname → the local uvicorn process. Cloudflare terminates HTTPS at
+  # its edge; traffic to the app stays on the loopback as plain HTTP.
+  - hostname: dictato.levelup-ai.com
+    service: http://127.0.0.1:8000
+  # Everything else gets a 404 (required catch-all rule).
+  - service: http_status:404
