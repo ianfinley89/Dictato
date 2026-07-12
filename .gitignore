@@ -3,6 +3,9 @@
 .env.*
 !.env.example
 
+# Porkbun/registrar exports — contain domain transfer AUTH CODES. Never commit.
+hosting_information/
+
 # ── User data, uploads, database ──
 data/
 uploads/
