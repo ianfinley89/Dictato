@@ -91,7 +91,9 @@ _ANNOTATE_TOOL = {
                            "description": "2-4 word human name for the whole capture, e.g. 'cereal with berries'"},
             "tags": {"type": "array", "items": {"type": "string"},
                      "description": "kebab-case, category-prefixed: activity:cycling, restaurant:taco-bell, "
-                                    "drink:margarita, context:ate-out, context:post-workout"},
+                                    "drink:margarita, context:ate-out, context:post-workout; when a photo's "
+                                    "portions were scaled off a known-size object, add scale:<object> "
+                                    "(e.g. scale:fork, scale:soda-can)"},
             "specificity": {"type": "string", "enum": ["low", "medium", "high"],
                             "description": "how precise the user was about portions/brands — "
                                            "'a bite of taco' is low, 'two 110g Chipotle chicken tacos' is high"},
@@ -179,7 +181,11 @@ with servings. Otherwise use realistic typical portions in grams. Restaurant por
 run LARGE and generic-database units run small: at a wing joint a "wing" is often a \
 WHOLE wing (drum + flat, ~90-120g each, not a ~30g segment), a basket of fries is \
 200-300g, a restaurant burrito 400g+. Size quantities for the restaurant's reality, \
-never package/USDA defaults.
+never package/USDA defaults. In a PHOTO, if an object of known size is in frame \
+(soda can, fork, credit card, standard ~27cm dinner plate), use it as a scale \
+reference for portion sizes and NAME it in your final sentence ("judging by the \
+fork, ..."); if none is present, estimate normally — never claim a reference you \
+don't clearly see.
 5. When a specific restaurant is named and there is no matching branded candidate, \
 web_search that restaurant's item FIRST — portion style (whole vs segments, basket \
 size, breaded or not) and published calorie estimates — then log the generic \

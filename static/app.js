@@ -400,7 +400,7 @@ function showResultCard(result, photoUrl = '') {
   const showTranscript = !!result.transcript;
   t.textContent = showTranscript ? `“${result.transcript}”` : '';
   t.classList.toggle('hidden', !showTranscript);
-  renderResultAnnotation(result.annotation || {});
+  renderResultAnnotation(result.annotation || {}, !!photoUrl);
   renderResultEntries(result.entries || []);
   // Follow-ups refine THIS capture ("say more" after a photo, photo after voice).
   $('result-followup').classList.toggle('hidden', !result.capture_id);
@@ -419,7 +419,7 @@ $('followup-photo').addEventListener('click', () => {
 });
 
 // Meal / tag chips + a gentle nudge when the capture was vague.
-function renderResultAnnotation(a) {
+function renderResultAnnotation(a, isPhoto = false) {
   const el = $('result-annotation');
   const chips = [];
   if (a.meal) chips.push(a.meal);
@@ -427,7 +427,9 @@ function renderResultAnnotation(a) {
   for (const tag of (a.tags || [])) chips.push(tag.replace(':', ': '));
   let html = chips.map(c => `<span class="ann-chip">${esc(c)}</span>`).join('');
   if (a.specificity === 'low') {
-    html += `<div class="ann-hint">Rough estimate — more detail next time ("two beef tacos from…") sharpens the numbers.</div>`;
+    html += isPhoto
+      ? `<div class="ann-hint">Rough estimate — next time include a fork, can, or card in the shot; a known-size object gives the AI a scale reference.</div>`
+      : `<div class="ann-hint">Rough estimate — more detail next time ("two beef tacos from…") sharpens the numbers.</div>`;
   }
   el.innerHTML = html;
   el.classList.toggle('hidden', !html);
@@ -439,15 +441,18 @@ function renderResultEntries(entries) {
     wrap.innerHTML = '';
     return;
   }
-  wrap.innerHTML = entries.map(e => `
+  wrap.innerHTML = entries.map(e => {
+    const equiv = servingEquiv(e.quantity_g, e.serving_g, e.serving_desc);
+    return `
     <div class="result-entry" data-id="${e.id}">
       <div class="result-entry-info">
         <div class="result-entry-name">${esc(e.food_name)}${e.food_brand ? ' · ' + esc(e.food_brand) : ''}</div>
-        <div class="result-entry-meta">${Math.round(e.quantity_g)}g · ${e.calories.toFixed(0)} cal · ${icon('db')} ${esc(e.food_source || '')}</div>
+        <div class="result-entry-meta">${Math.round(e.quantity_g)}g${equiv ? ` (${esc(equiv)})` : ''} · ${e.calories.toFixed(0)} cal · ${icon('db')} ${esc(e.food_source || '')}</div>
       </div>
       <button class="result-adjust link-btn" data-id="${e.id}" data-food="${e.food_id}" data-qty="${e.quantity_g}">Adjust</button>
       <button class="result-undo link-btn" data-id="${e.id}">Undo</button>
-    </div>`).join('');
+    </div>`;
+  }).join('');
 
   wrap.querySelectorAll('.result-undo').forEach(btn => {
     btn.addEventListener('click', async () => {
@@ -591,12 +596,41 @@ function mealOf(eatenAt) {
   return 'Snacks';
 }
 
+// "45g" is hard to picture; the food's own household serving usually isn't.
+// Returns "≈ 5 cakes", "≈ 1.9 cups (240ml)", "≈ 300 ml", "≈ 2 × 3 cookies",
+// or '' when the food has no usable serving info (or it would just repeat grams).
+function servingEquiv(qtyG, servingG, desc) {
+  if (!servingG || servingG <= 0 || !desc) return '';
+  const d = String(desc).trim();
+  const n = qtyG / servingG;
+  if (!isFinite(n) || n < 0.1 || n > 50) return '';
+  const nice = Math.abs(n - Math.round(n)) < 0.05 ? String(Math.round(n)) : n.toFixed(1);
+
+  // Pure-volume serving ("600.0 ml") → convert the whole quantity to ml.
+  const ml = d.match(/^([\d.]+)\s*ml$/i);
+  if (ml) return `≈ ${Math.round(n * parseFloat(ml[1]))} ml`;
+  // A gram-shaped desc ("30 g") would just repeat the number we already show.
+  if (/^[\d.]+\s*(g|grm|gram|grams)$/i.test(d)) return '';
+
+  // "1 cake" → "≈ 5 cakes"; a multi-unit serving ("3 cookies") → "≈ 2 × 3 cookies".
+  const one = d.match(/^1\s+(.*)$/);
+  if (one) {
+    let unit = one[1];
+    if (nice !== '1') {
+      unit = unit.replace(/^([A-Za-z]+)/, w => (/(s|x|z|ch|sh)$/i.test(w) ? w + 'es' : w + 's'));
+    }
+    return `≈ ${nice} ${unit}`;
+  }
+  return nice === '1' ? `≈ ${d}` : `≈ ${nice} × ${d}`;
+}
+
 function entryHtml(e) {
+  const equiv = servingEquiv(e.quantity_g, e.serving_g, e.serving_desc);
   return `<div class="log-entry" data-id="${e.id}" data-food="${e.food_id}" data-qty="${e.quantity_g}">
     <span class="log-source-icon">${sourceIcon(e.source)}</span>
     <div class="log-info">
       <div class="log-name">${esc(e.food_name)}</div>
-      <div class="log-meta">${e.quantity_g}g${e.food_brand ? ' · ' + esc(e.food_brand) : ''}</div>
+      <div class="log-meta">${e.quantity_g}g${equiv ? ' · ' + esc(equiv) : ''}${e.food_brand ? ' · ' + esc(e.food_brand) : ''}</div>
       ${e.food_source ? `<div class="log-src">${icon('db')} ${esc(e.food_source)}</div>` : ''}
     </div>
     <div class="log-nutrition">
@@ -622,7 +656,7 @@ async function adjustEntry(entryId, foodId, qty) {
 function renderLog() {
   if (!state.dayLog.length) {
     logList.innerHTML = `<div class="empty-state">Nothing logged yet.<br>Say it, snap it, or add it manually.
-      <button id="log-empty-home" class="btn-secondary" type="button">Back to Home</button></div>`;
+      <button id="log-empty-home" class="btn-secondary" type="button">Home</button></div>`;
     $('log-empty-home').addEventListener('click', () => showPane('home'));
     return;
   }

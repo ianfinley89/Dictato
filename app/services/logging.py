@@ -90,6 +90,8 @@ def log_entry_for_user(
         "notes": notes,
         "food_source": label,
         "food_source_raw": food["source"],
+        "serving_g": food.get("serving_g"),
+        "serving_desc": food.get("serving_desc"),
         **snapshot,
     }
 
@@ -126,7 +128,9 @@ def update_entry_quantity(user_id: int, entry_id: int, quantity_g: float) -> dic
         label = source_label(conn, food["id"], food["source"])
     return {"id": entry_id, "food_id": food["id"], "food_name": food["name"],
             "food_brand": food.get("brand"), "quantity_g": quantity_g,
-            "food_source": label, "food_source_raw": food["source"], **snapshot}
+            "food_source": label, "food_source_raw": food["source"],
+            "serving_g": food.get("serving_g"), "serving_desc": food.get("serving_desc"),
+            **snapshot}
 
 
 def remove_entry(user_id: int, entry_id: int) -> None:
@@ -145,7 +149,8 @@ def current_entries(user_id: int, entry_ids: list[int]) -> list[dict]:
     marks = ",".join("?" * len(entry_ids))
     with get_conn() as conn:
         rows = conn.execute(
-            f"""SELECT le.*, f.name AS food_name, f.brand AS food_brand, f.source AS food_source_raw
+            f"""SELECT le.*, f.name AS food_name, f.brand AS food_brand, f.source AS food_source_raw,
+                       f.serving_g, f.serving_desc
                 FROM log_entries le JOIN foods f ON f.id = le.food_id
                 WHERE le.user_id=? AND le.id IN ({marks}) ORDER BY le.id""",
             (user_id, *entry_ids),
@@ -158,6 +163,7 @@ def current_entries(user_id: int, entry_ids: list[int]) -> list[dict]:
                 "food_brand": r["food_brand"], "eaten_at": r["eaten_at"],
                 "quantity_g": r["quantity_g"], "source": r["source"], "notes": r["notes"],
                 "food_source": source_label(conn, r["food_id"], r["food_source_raw"]),
-                "food_source_raw": r["food_source_raw"], **snap,
+                "food_source_raw": r["food_source_raw"],
+                "serving_g": r["serving_g"], "serving_desc": r["serving_desc"], **snap,
             })
     return out

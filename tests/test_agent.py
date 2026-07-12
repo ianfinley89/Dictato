@@ -671,6 +671,23 @@ def test_revision_blocks_duplicate_relog(client, monkeypatch):
     assert d["transcript"] == "I had two rice cakes"
 
 
+def test_entries_carry_serving_info_for_equivalents(client):
+    """Result-card and log-pane entries include serving_g/serving_desc so the
+    UI can show human-scale equivalents ("18g ≈ 2 cakes") next to grams."""
+    uid = _register(client)
+    food_id = _seed_food()                      # '1 cake', serving_g 9.0
+    _log_once(uid, food_id)
+
+    r = client.post("/api/agent/log", data={"text": "I had two rice cakes"})
+    e = r.json()["entries"][0]
+    assert e["serving_g"] == pytest.approx(9.0)
+    assert e["serving_desc"] == "1 cake"
+
+    day = client.get("/api/log/today").json()
+    assert day[0]["serving_g"] == pytest.approx(9.0)
+    assert day[0]["serving_desc"] == "1 cake"
+
+
 # ── Audio persistence (dataset material + STT-failure replay) ─────────────────
 
 def _fake_transcribe(text):

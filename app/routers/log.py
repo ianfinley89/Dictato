@@ -34,7 +34,8 @@ async def get_today(request: Request, tz_offset: int = 0, date: str | None = Non
     target = date if (date and _DATE_RE.match(date)) else _local_today(tz_offset)
     with get_conn() as conn:
         rows = conn.execute(
-            """SELECT le.*, f.name AS food_name, f.brand AS food_brand, f.source AS food_source
+            """SELECT le.*, f.name AS food_name, f.brand AS food_brand, f.source AS food_source,
+                      f.serving_g, f.serving_desc
                FROM log_entries le JOIN foods f ON f.id = le.food_id
                WHERE le.user_id=? AND DATE(le.eaten_at, ?) = ?
                ORDER BY le.eaten_at""",
@@ -73,7 +74,8 @@ async def get_range(request: Request, start: str, end: str):
     uid = get_current_user_id(request)
     with get_conn() as conn:
         rows = conn.execute(
-            """SELECT le.*, f.name AS food_name, f.brand AS food_brand, f.source AS food_source
+            """SELECT le.*, f.name AS food_name, f.brand AS food_brand, f.source AS food_source,
+                      f.serving_g, f.serving_desc
                FROM log_entries le JOIN foods f ON f.id = le.food_id
                WHERE le.user_id=? AND DATE(le.eaten_at) BETWEEN ? AND ?
                ORDER BY le.eaten_at""",
@@ -161,6 +163,10 @@ def _format_entry(row, conn=None) -> dict:
         "fat_g": snap.get("fat_g", 0),
         "fiber_g": snap.get("fiber_g", 0),
     }
+    # Household-serving info so the UI can show "≈ 5 cakes" next to grams.
+    if "serving_g" in row.keys():
+        entry["serving_g"] = row["serving_g"]
+        entry["serving_desc"] = row["serving_desc"]
     if conn is not None and "food_source" in row.keys():
         entry["food_source"] = source_label(conn, row["food_id"], row["food_source"])
     return entry
