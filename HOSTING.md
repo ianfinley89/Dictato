@@ -29,8 +29,10 @@ restart; a named tunnel bound to your domain is what makes the URL permanent.
 
 ## Part 1 — Move DNS to Cloudflare (one time, ~15 min + propagation)
 
-1. Create a free account at cloudflare.com → **Add a site** → enter
-   `levelup-ai.com` → choose the **Free** plan.
+1. Create a free account at cloudflare.com → **Add a site** (the current
+   dashboard labels this **"Connect your domain"** — the *connect an existing
+   domain* path, **not** "Register a new domain", which is the Registrar upsell
+   you're avoiding) → enter `levelup-ai.com` → choose the **Free** plan.
 2. Cloudflare scans and imports your existing records. **Verify** they all came
    across — especially any MX/TXT (email, domain verification). Add any it missed.
 3. Cloudflare shows **two nameservers** (like `dana.ns.cloudflare.com`).
