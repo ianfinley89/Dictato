@@ -78,32 +78,40 @@ Visit **https://dictato.levelup-ai.com** — you should see Dictato over HTTPS.
 
 ## Part 3 — Make it survive reboots (the "always-on" half)
 
-A permanent URL is only useful if the tunnel **and** the app auto-start.
+A permanent URL is only useful if the app **and** the tunnel come back after a
+reboot — including an unattended one (a Windows Update at 3am), without anyone
+logging in. Both run as **Windows scheduled tasks** that start at boot, run as
+you with **no stored password** (S4U logon), and restart on crash (the wrapper
+scripts loop). Running both as *you* — not as SYSTEM — also avoids the
+config-path trap that `cloudflared service install` hits on Windows (the SYSTEM
+service looks in the wrong `.cloudflared` folder).
 
-**Tunnel as a Windows service:**
+1. Set `SECURE_COOKIES=true` in `.env`. (Cloudflare serves HTTPS at its edge;
+   the app stays plain HTTP on `127.0.0.1:8000`, which is correct on loopback.)
+2. Stop any manual smoke-test windows (`Ctrl+C` the `uvicorn` and
+   `cloudflared tunnel run` ones) so they don't collide with the tasks.
+3. In an **elevated** PowerShell (Run as administrator):
+
+   ```powershell
+   cd C:\Users\ianfi\workspace\Dictato
+   powershell -ExecutionPolicy Bypass -File deploy\install-dictato-tasks.ps1
+   ```
+
+That registers and starts two tasks — **Dictato** (the app) and
+**Dictato-Tunnel** (the tunnel) — and prints their status. A `Result` of
+`267009` means "running" (good); `0` means it exited. Per-process logs are
+`dictato-app.log` and `dictato-tunnel.log` in the repo root.
+
+Then open **https://dictato.levelup-ai.com** — it now survives reboots.
+
+Managing the tasks:
 
 ```powershell
-cloudflared service install
+Get-ScheduledTask Dictato,Dictato-Tunnel | Get-ScheduledTaskInfo    # status
+Stop-ScheduledTask Dictato                                          # stop the app
+Start-ScheduledTask Dictato                                         # start it
+Unregister-ScheduledTask Dictato,Dictato-Tunnel -Confirm:$false     # remove both
 ```
-
-It runs `%USERPROFILE%\.cloudflared\config.yml` on boot, before login.
-
-**App as a Windows service** (so uvicorn restarts on reboot / crash). Easiest
-with [NSSM](https://nssm.cc/):
-
-```powershell
-nssm install Dictato "C:\Users\ianfi\.local\bin\uv.exe" "run uvicorn app.main:app --host 127.0.0.1 --port 8000"
-nssm set Dictato AppDirectory "C:\Users\ianfi\workspace\Dictato"
-nssm start Dictato
-```
-
-(Adjust the `uv.exe` path — `(Get-Command uv).Source` shows it. The
-`AppDirectory` must be the repo root so it finds `app/` and `.env`.) A Task
-Scheduler "at startup" task works too if you'd rather not install NSSM.
-
-**Then flip the app to HTTPS mode:** set `SECURE_COOKIES=true` in `.env` and
-restart the Dictato service. (Cloudflare terminates HTTPS at its edge; the app
-stays plain HTTP on `127.0.0.1:8000`, which is correct and safe on loopback.)
 
 ---
 
