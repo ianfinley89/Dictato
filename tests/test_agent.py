@@ -188,7 +188,7 @@ def test_tool_create_food_per_serving_requires_serving_g(client):
     assert "error" in out
 
 
-def test_tool_create_food_web_is_public_and_clamped(client):
+def test_tool_create_food_web_is_public_and_sanitized(client):
     uid = _register(client)
     from app.services.agent import _tool_create_food
     out = _tool_create_food(uid, {
@@ -199,7 +199,9 @@ def test_tool_create_food_web_is_public_and_clamped(client):
     from app.services.food_lookup import get_food_by_id
     food = get_food_by_id(out["food_id"])
     assert food["source"] == "web"
-    assert food["nutrients_per_100g"]["calories"] == pytest.approx(900.0)  # clamped
+    # Impossible energy with sane macros → recomputed from Atwater (4·12+4·14+9·9=185),
+    # which beats the old crude 900 cap.
+    assert food["nutrients_per_100g"]["calories"] == pytest.approx(185.0)
     assert food["source_id"] == "https://example.com/nutrition"
 
 

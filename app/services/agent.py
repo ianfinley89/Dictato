@@ -20,6 +20,7 @@ from app.services.ai_usage import record_tokens
 from app.services.food_lookup import search_foods, get_food_by_id
 from app.services.logging import (log_entry_for_user, update_entry_quantity,
                                   remove_entry, FoodNotFound)
+from app.services.nutrition_guard import sanitize_per_100g
 from app.services.profile import apply_profile_update
 from app.services.voice_parse import parse_local
 
@@ -281,13 +282,15 @@ def _tool_create_food(user_id: int, inp: dict) -> dict:
         factor = 100.0 / serving_g
     else:
         factor = 1.0
-    nutrients = {
-        "calories": _clamp(_num(inp.get("calories")) * factor, 0, 900),
+    # Physical bounds on the macros, then the shared plausibility guard on energy
+    # (kJ-as-kcal, impossible calories) — same treatment DB-cached foods get.
+    nutrients, _ = sanitize_per_100g({
+        "calories": _num(inp.get("calories")) * factor,
         "protein_g": _clamp(_num(inp.get("protein_g")) * factor, 0, 100),
         "carbs_g": _clamp(_num(inp.get("carbs_g")) * factor, 0, 100),
         "fat_g": _clamp(_num(inp.get("fat_g")) * factor, 0, 100),
         "fiber_g": _clamp(_num(inp.get("fiber_g")) * factor, 0, 80),
-    }
+    })
     with get_conn() as conn:
         cur = conn.execute(
             """INSERT INTO foods (source, source_id, name, brand, serving_desc, serving_g,

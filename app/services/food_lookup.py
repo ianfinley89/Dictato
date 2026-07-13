@@ -4,6 +4,7 @@ from typing import Optional
 from app.config import USDA_API_KEY
 from app.database import get_conn
 from app.services.fatsecret import search_fatsecret
+from app.services.nutrition_guard import sanitize_per_100g, KCAL_PER_KJ
 
 USDA_BASE = "https://api.nal.usda.gov/fdc/v1"
 OFF_BASE = "https://world.openfoodfacts.org/cgi/search.pl"
@@ -221,13 +222,24 @@ def _parse_usda(item: dict) -> Optional[dict]:
     }
 
 
+def _off_kcal(n: dict) -> float:
+    """Open Food Facts energy: prefer the kcal field; its `energy_100g` /
+    `energy-kj_100g` fallbacks are in KILOJOULES, so convert them (this is the
+    source of the '1000 cal ground beef' bug)."""
+    kcal = n.get("energy-kcal_100g")
+    if kcal not in (None, ""):
+        return float(kcal or 0)
+    kj = n.get("energy-kj_100g", n.get("energy_100g"))
+    return round(float(kj or 0) / KCAL_PER_KJ, 1) if kj not in (None, "") else 0.0
+
+
 def _parse_off(item: dict) -> Optional[dict]:
     name = item.get("product_name", "").strip()
     if not name:
         return None
     n = item.get("nutriments", {})
     nutrients = {
-        "calories": float(n.get("energy-kcal_100g", n.get("energy_100g", 0)) or 0),
+        "calories": _off_kcal(n),
         "protein_g": float(n.get("proteins_100g", 0) or 0),
         "carbs_g": float(n.get("carbohydrates_100g", 0) or 0),
         "fat_g": float(n.get("fat_100g", 0) or 0),
@@ -262,6 +274,16 @@ def _cache_food(food: dict) -> int:
                     conn.execute("UPDATE foods SET expires_at=? WHERE id=?",
                                  (food["expires_at"], existing["id"]))
                 return existing["id"]
+        # Catch corrupt nutrition (kJ-as-kcal, impossible energy) before storing.
+        # Only USDA/OFF carry genuine per-100g energy density; FatSecret encodes
+        # per-serving values in the per-100g slot, so it must not be "corrected".
+        nutrients_json = food["nutrients_json"]
+        if food.get("source") in ("usda", "off"):
+            try:
+                clean, _ = sanitize_per_100g(json.loads(nutrients_json))
+                nutrients_json = json.dumps(clean)
+            except (TypeError, ValueError):
+                pass
         cur = conn.execute(
             """INSERT INTO foods (source, source_id, name, brand, serving_desc, serving_g, nutrients_json, expires_at)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
@@ -272,7 +294,7 @@ def _cache_food(food: dict) -> int:
                 food.get("brand"),
                 food.get("serving_desc"),
                 food.get("serving_g"),
-                food["nutrients_json"],
+                nutrients_json,
                 food.get("expires_at"),
             ),
         )

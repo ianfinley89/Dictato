@@ -248,6 +248,7 @@ def _migrate(conn) -> None:
     if "expires_at" not in food_cols:
         conn.execute("ALTER TABLE foods ADD COLUMN expires_at TEXT")
     _backfill_serving_g(conn)
+    _repair_nutrients(conn)
 
     rem_cols = {r["name"] for r in conn.execute("PRAGMA table_info(reminders)")}
     if "tz_offset" not in rem_cols:
@@ -267,6 +268,29 @@ def _migrate(conn) -> None:
         conn.execute("ALTER TABLE issue_reports ADD COLUMN category TEXT")
     if "capture_id" not in iss_cols:
         conn.execute("ALTER TABLE issue_reports ADD COLUMN capture_id INTEGER")
+
+
+def _repair_nutrients(conn) -> None:
+    """Repair foods rows corrupted at ingest — chiefly kJ energy stored as kcal
+    (Open Food Facts' kJ fallback) and physically impossible calories. The guard
+    now runs on every write, so this only fixes rows cached before it existed.
+    Idempotent: only rows the guard actually changes are rewritten."""
+    import json
+    from app.services.nutrition_guard import sanitize_per_100g
+    # Only USDA/OFF are genuine per-100g; other sources encode per-serving values
+    # in the per-100g slot and must be left alone.
+    rows = conn.execute(
+        "SELECT id, nutrients_json FROM foods WHERE source IN ('usda', 'off')"
+    ).fetchall()
+    for r in rows:
+        try:
+            current = json.loads(r["nutrients_json"])
+        except (TypeError, ValueError):
+            continue
+        clean, note = sanitize_per_100g(current)
+        if note:
+            conn.execute("UPDATE foods SET nutrients_json=? WHERE id=?",
+                         (json.dumps(clean), r["id"]))
 
 
 def _backfill_serving_g(conn) -> None:

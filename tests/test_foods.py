@@ -152,6 +152,58 @@ def test_weblookup_no_api_key_503(client, monkeypatch):
     assert client.post("/api/foods/weblookup", json={"name": "x", "brand": "y"}).status_code == 503
 
 
+def test_off_parser_converts_kj_energy():
+    """Open Food Facts energy fallbacks are kilojoules — the parser must convert."""
+    from app.services.food_lookup import _parse_off
+    # Only the kJ field present (the ground-beef bug shape).
+    kj_only = _parse_off({
+        "product_name": "Ground Beef",
+        "nutriments": {"energy_100g": 1046, "proteins_100g": 17,
+                       "carbohydrates_100g": 0, "fat_100g": 20},
+    })
+    assert json.loads(kj_only["nutrients_json"])["calories"] == pytest.approx(250.0, abs=1)
+    # kcal field present → used as-is.
+    kcal = _parse_off({
+        "product_name": "Ground Beef",
+        "nutriments": {"energy-kcal_100g": 254, "energy_100g": 1046, "proteins_100g": 17},
+    })
+    assert json.loads(kcal["nutrients_json"])["calories"] == pytest.approx(254.0)
+
+
+def test_cache_guard_fixes_kj_energy(client, monkeypatch):
+    """A source that hands _cache_food raw kJ-as-kcal gets corrected on store."""
+    from app.services import food_lookup
+
+    async def fake_usda(query, limit):
+        n = {"calories": 1046.0, "protein_g": 17.0, "carbs_g": 0.0,
+             "fat_g": 20.0, "fiber_g": 0.0, "micros": {}}
+        return [{"source": "usda", "source_id": "BEEF1", "name": "Ground Beef",
+                 "brand": None, "serving_desc": None, "serving_g": None,
+                 "nutrients_json": json.dumps(n)}]
+
+    monkeypatch.setattr(food_lookup, "_search_usda", fake_usda)
+    client.post("/api/auth/register", json=REG)
+    food = client.get("/api/foods/search?q=ground+beef").json()[0]
+    assert food["nutrients_per_100g"]["calories"] == pytest.approx(250.0, abs=2)
+
+
+def test_repair_nutrients_fixes_existing_rows():
+    """The startup repair rewrites rows poisoned before the guard existed."""
+    from app.database import get_conn, _repair_nutrients
+    bad = {"calories": 1046.0, "protein_g": 17.0, "carbs_g": 0.0, "fat_g": 20.0,
+           "fiber_g": 0.0, "micros": {}}
+    with get_conn() as conn:
+        cur = conn.execute(
+            "INSERT INTO foods (source, source_id, name, nutrients_json) VALUES (?,?,?,?)",
+            ("off", "BEEF-KJ", "Ground Beef", json.dumps(bad)),
+        )
+        fid = cur.lastrowid
+        _repair_nutrients(conn)
+        fixed = json.loads(conn.execute(
+            "SELECT nutrients_json FROM foods WHERE id=?", (fid,)).fetchone()["nutrients_json"])
+    assert fixed["calories"] == pytest.approx(250.0, abs=2)
+
+
 def test_serving_grams_conversion():
     from app.services.food_lookup import _serving_grams
     assert _serving_grams(355, "ml") == 355.0
