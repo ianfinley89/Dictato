@@ -859,10 +859,12 @@ async function startVoiceCapture() {
   recChunks = [];
   recCancelled = false;
   const mime = pickAudioMime();
+  const opts = mime ? { mimeType: mime } : {};
+  opts.audioBitsPerSecond = 128000;   // steady quality; some Android defaults are too low
   try {
-    mediaRecorder = mime ? new MediaRecorder(stream, { mimeType: mime }) : new MediaRecorder(stream);
+    mediaRecorder = new MediaRecorder(stream, opts);
   } catch {
-    mediaRecorder = new MediaRecorder(stream);
+    mediaRecorder = new MediaRecorder(stream);   // last resort: browser defaults
   }
 
   mediaRecorder.ondataavailable = (e) => { if (e.data && e.data.size) recChunks.push(e.data); };
@@ -880,7 +882,10 @@ async function startVoiceCapture() {
   };
 
   openVoiceOverlay();
-  mediaRecorder.start(250);   // flush chunks as we go
+  // Record as ONE continuous blob — no timeslice. A timeslice (start(250)) makes
+  // Android Chrome flush the Opus encoder every interval, which glitches and clips
+  // the audio (Pixel especially); we only use the final blob anyway.
+  mediaRecorder.start();
   setListening(true);
 }
 
