@@ -442,10 +442,12 @@ async def run_agent(user_id: int, *, text: str | None = None,
     annotation: dict = {}
     summary = ""
 
+    # Route photo captures to the vision model, voice/text to the text model.
+    feature = "photo" if image else "voice"
     error = False
     for turn in range(MAX_TURNS):
         try:
-            resp = await llm.chat(feature="agent", system=system, messages=messages,
+            resp = await llm.chat(feature=feature, system=system, messages=messages,
                                   tools=tools, max_tokens=1500, user_id=user_id)
         except Exception:
             # Anything already logged this session stays logged — surface that

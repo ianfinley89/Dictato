@@ -58,6 +58,55 @@ def _model_for(feature: str) -> str:
     return MODEL_HAIKU   # anthropic default
 
 
+_KNOWN_PROVIDERS = {"anthropic", "openrouter", "local"}
+
+
+def _endpoint(provider: str):
+    """(kind, base_url, api_key) for a named provider. kind ∈ 'anthropic'|'openai'."""
+    if provider == "openrouter":
+        return "openai", config.OPENROUTER_BASE_URL, config.OPENROUTER_API_KEY
+    if provider == "local":
+        return "openai", config.LOCAL_BASE_URL, config.LOCAL_API_KEY
+    if provider == "openai":                       # legacy global endpoint
+        return "openai", config.LLM_BASE_URL, config.LLM_API_KEY
+    return "anthropic", "", config.ANTHROPIC_API_KEY
+
+
+def _feature_spec(feature: str) -> str:
+    return {
+        "voice": config.VOICE_MODEL or config.AGENT_MODEL,
+        "agent": config.AGENT_MODEL or config.VOICE_MODEL,
+        "photo": config.PHOTO_MODEL,
+        "coach": config.COACH_MODEL,
+        "issue_triage": config.TRIAGE_MODEL,
+    }.get(feature, "")
+
+
+def _resolve_feature(feature: str):
+    """Route a feature → (kind, model, base_url, api_key). A per-feature value may
+    be 'provider:model' (provider ∈ anthropic/openrouter/local — a bare colon in
+    the model id like ':free' is preserved) or a bare model id (global provider).
+    Unset → the global default, EXCEPT 'photo', which defaults to a vision-capable
+    Anthropic model so photos never break when text features are pointed at a
+    non-vision model like DeepSeek."""
+    spec = (_feature_spec(feature) or "").strip()
+    if spec:
+        head, sep, rest = spec.partition(":")
+        if sep and rest and head in _KNOWN_PROVIDERS:
+            kind, base, key = _endpoint(head)
+            return kind, rest, base, key
+        if config.LLM_PROVIDER == "openai":        # bare model on the global endpoint
+            kind, base, key = _endpoint("openai")
+            return kind, spec, base, key
+        return "anthropic", spec, "", config.ANTHROPIC_API_KEY
+    if feature == "photo":                          # vision safety net
+        return "anthropic", MODEL_HAIKU, "", config.ANTHROPIC_API_KEY
+    if config.LLM_PROVIDER == "openai":
+        kind, base, key = _endpoint("openai")
+        return kind, (config.LLM_MODEL or MODEL_HAIKU), base, key
+    return "anthropic", MODEL_HAIKU, "", config.ANTHROPIC_API_KEY
+
+
 def _sanitize_messages(messages: list) -> list:
     """A JSON-safe snapshot of the request for tracing: image payloads redacted,
     provider-native blocks stringified. Never raises."""
@@ -110,14 +159,14 @@ def _record_trace(*, user_id, feature, provider, model, latency_ms, system, mess
 async def chat(*, feature: str, system: str, messages: list,
                tools: list | None = None, max_tokens: int = 1024,
                user_id: int | None = None) -> LLMResponse:
-    provider = "openai" if config.LLM_PROVIDER == "openai" else "anthropic"
-    model = _model_for(feature)
+    kind, model, _base, _key = _resolve_feature(feature)
+    provider = "anthropic" if kind == "anthropic" else "openai"
     t0 = time.perf_counter()
     try:
-        if provider == "openai":
-            resp = await _chat_openai(feature, system, messages, tools, max_tokens)
-        else:
+        if kind == "anthropic":
             resp = await _chat_anthropic(feature, system, messages, tools, max_tokens)
+        else:
+            resp = await _chat_openai(feature, system, messages, tools, max_tokens)
     except Exception as e:
         _record_trace(user_id=user_id, feature=feature, provider=provider, model=model,
                       latency_ms=int((time.perf_counter() - t0) * 1000),
@@ -171,8 +220,9 @@ def _anthropic_messages(messages):
 
 async def _chat_anthropic(feature, system, messages, tools, max_tokens):
     import anthropic
-    client = anthropic.AsyncAnthropic(api_key=config.ANTHROPIC_API_KEY)
-    kwargs = dict(model=_model_for(feature), max_tokens=max_tokens, system=system,
+    _kind, model, _base, api_key = _resolve_feature(feature)
+    client = anthropic.AsyncAnthropic(api_key=api_key or config.ANTHROPIC_API_KEY)
+    kwargs = dict(model=model, max_tokens=max_tokens, system=system,
                   messages=_anthropic_messages(messages))
     atools = _anthropic_tools(tools)
     if atools:
@@ -228,9 +278,10 @@ def _openai_messages(system, messages):
 
 async def _chat_openai(feature, system, messages, tools, max_tokens):
     from openai import AsyncOpenAI
-    client = AsyncOpenAI(base_url=config.LLM_BASE_URL or None, api_key=config.LLM_API_KEY or "none")
+    _kind, model, base_url, api_key = _resolve_feature(feature)
+    client = AsyncOpenAI(base_url=base_url or None, api_key=api_key or "none")
     otools = _openai_tools(tools)
-    kwargs = dict(model=_model_for(feature), max_tokens=max_tokens,
+    kwargs = dict(model=model, max_tokens=max_tokens,
                   messages=_openai_messages(system, messages))
     if otools:
         kwargs["tools"] = otools

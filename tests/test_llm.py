@@ -19,6 +19,68 @@ def test_model_for_precedence(monkeypatch):
     assert llm._model_for("coach") == "deepseek/deepseek-chat"   # coach still global
 
 
+# ── Per-feature routing (_resolve_feature) ────────────────────────────────────
+
+def _clear_routing(monkeypatch):
+    for v in ("VOICE_MODEL", "PHOTO_MODEL", "COACH_MODEL", "TRIAGE_MODEL",
+              "AGENT_MODEL", "LLM_MODEL", "LLM_BASE_URL", "LLM_API_KEY"):
+        monkeypatch.setattr(llm.config, v, "")
+    monkeypatch.setattr(llm.config, "LLM_PROVIDER", "anthropic")
+    monkeypatch.setattr(llm.config, "ANTHROPIC_API_KEY", "sk-ant")
+
+
+def test_resolve_defaults_to_anthropic_haiku(monkeypatch):
+    _clear_routing(monkeypatch)
+    assert llm._resolve_feature("voice")[:2] == ("anthropic", llm.MODEL_HAIKU)
+    assert llm._resolve_feature("coach")[:2] == ("anthropic", llm.MODEL_HAIKU)
+    assert llm._resolve_feature("photo")[:2] == ("anthropic", llm.MODEL_HAIKU)
+
+
+def test_resolve_explicit_openrouter_provider(monkeypatch):
+    _clear_routing(monkeypatch)
+    monkeypatch.setattr(llm.config, "PHOTO_MODEL", "openrouter:google/gemini-3.1-flash-lite-image")
+    monkeypatch.setattr(llm.config, "OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
+    monkeypatch.setattr(llm.config, "OPENROUTER_API_KEY", "sk-or-x")
+    kind, model, base, key = llm._resolve_feature("photo")
+    assert (kind, model, base, key) == (
+        "openai", "google/gemini-3.1-flash-lite-image", "https://openrouter.ai/api/v1", "sk-or-x")
+
+
+def test_resolve_preserves_free_suffix(monkeypatch):
+    _clear_routing(monkeypatch)
+    monkeypatch.setattr(llm.config, "VOICE_MODEL", "openrouter:deepseek/deepseek-chat:free")
+    kind, model, _b, _k = llm._resolve_feature("voice")
+    assert kind == "openai" and model == "deepseek/deepseek-chat:free"
+
+
+def test_resolve_photo_stays_vision_when_text_is_swapped(monkeypatch):
+    """Voice on DeepSeek (no vision); photo unset must NOT inherit it — it falls
+    back to a vision-capable Anthropic model so photo logging keeps working."""
+    _clear_routing(monkeypatch)
+    monkeypatch.setattr(llm.config, "VOICE_MODEL", "openrouter:deepseek/deepseek-chat")
+    monkeypatch.setattr(llm.config, "OPENROUTER_API_KEY", "sk-or-x")
+    assert llm._resolve_feature("voice")[0] == "openai"
+    assert llm._resolve_feature("photo")[:2] == ("anthropic", llm.MODEL_HAIKU)
+
+
+def test_resolve_local_provider(monkeypatch):
+    _clear_routing(monkeypatch)
+    monkeypatch.setattr(llm.config, "COACH_MODEL", "local:gemma3")
+    monkeypatch.setattr(llm.config, "LOCAL_BASE_URL", "http://localhost:11434/v1")
+    monkeypatch.setattr(llm.config, "LOCAL_API_KEY", "ollama")
+    assert llm._resolve_feature("coach") == ("openai", "gemma3", "http://localhost:11434/v1", "ollama")
+
+
+def test_resolve_bare_model_uses_global_provider(monkeypatch):
+    _clear_routing(monkeypatch)
+    monkeypatch.setattr(llm.config, "LLM_PROVIDER", "openai")
+    monkeypatch.setattr(llm.config, "LLM_BASE_URL", "https://openrouter.ai/api/v1")
+    monkeypatch.setattr(llm.config, "LLM_API_KEY", "sk-or-x")
+    monkeypatch.setattr(llm.config, "VOICE_MODEL", "deepseek/deepseek-chat")  # no provider prefix
+    kind, model, base, key = llm._resolve_feature("voice")
+    assert (kind, model, base) == ("openai", "deepseek/deepseek-chat", "https://openrouter.ai/api/v1")
+
+
 # ── Tool translation ──────────────────────────────────────────────────────────
 
 _TOOLS = [

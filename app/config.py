@@ -38,3 +38,17 @@ LLM_API_KEY: str = os.getenv("LLM_API_KEY", "")             # provider key (any 
 LLM_MODEL: str = os.getenv("LLM_MODEL", "")                 # default model when provider=openai
 AGENT_MODEL: str = os.getenv("AGENT_MODEL", "")             # per-feature overrides (optional)
 COACH_MODEL: str = os.getenv("COACH_MODEL", "")
+
+# Per-feature model routing. Each value may carry an explicit "provider:model"
+# prefix — provider ∈ anthropic | openrouter | local — or a bare model id (which
+# uses the global provider above). Unset falls back to the global default;
+# PHOTO defaults to Anthropic Haiku so vision never breaks when the text features
+# are pointed at a non-vision model like DeepSeek.
+VOICE_MODEL: str = os.getenv("VOICE_MODEL", "")             # voice/text logging agent
+PHOTO_MODEL: str = os.getenv("PHOTO_MODEL", "")             # photo logging agent (needs vision)
+TRIAGE_MODEL: str = os.getenv("TRIAGE_MODEL", "")           # issue triage (trivial — cheapest model is fine)
+# Named endpoints the specs above point at:
+OPENROUTER_BASE_URL: str = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
+OPENROUTER_API_KEY: str = os.getenv("OPENROUTER_API_KEY", "")
+LOCAL_BASE_URL: str = os.getenv("LOCAL_BASE_URL", "")       # e.g. http://localhost:11434/v1 (Ollama/vLLM)
+LOCAL_API_KEY: str = os.getenv("LOCAL_API_KEY", "ollama")
