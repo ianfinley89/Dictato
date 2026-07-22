@@ -52,6 +52,10 @@ os.makedirs(EVAL_DIR, exist_ok=True)
 os.environ["DATABASE_PATH"] = DB_PATH
 os.environ["WHISPER_WARMUP"] = "false"
 
+RUN_TAG = "baseline"          # a prompt/model variant label; set by --tag
+COOKED_RE = re.compile(r"\b(fried|scrambled|roasted|hash|bacon|sausage|sauteed|"
+                       r"breaded|grilled|baked|egg|omelet)\w*", re.I)
+
 DB_SOURCES = ("usda", "off", "fatsecret")
 MACROS = ("calories", "protein_g", "carbs_g", "fat_g")
 
@@ -155,10 +159,11 @@ async def probe_db_candidates(name: str, uid: int) -> list[str]:
 
 
 async def run_dish(uid: int, dish: dict) -> dict:
-    from app.services import agent
+    from app.services import agent, llm
     transcript = transcript_for(dish)
     row = {"dish_id": dish["dish_id"], "cafe": dish["cafe"], "transcript": transcript,
-           "n_ingredients": len(dish["ingredients"]), "gt": dish["gt"]}
+           "n_ingredients": len(dish["ingredients"]), "gt": dish["gt"],
+           "tag": RUN_TAG, "model": llm._resolve_feature("voice")[1]}
 
     row["baseline"] = await baseline_estimate(transcript)
 
@@ -277,13 +282,92 @@ def report() -> None:
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
+def _load_file(path: str) -> list[dict]:
+    if not os.path.exists(path):
+        return []
+    by_id = {}
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            if line.strip():
+                r = json.loads(line)
+                by_id[r["dish_id"]] = r
+    return [r for r in by_id.values() if _ok(r)]
+
+
+def compare() -> None:
+    """Aggregate every n5k_grounding*.jsonl into a variant x metrics matrix — the
+    self-contained stand-in for an external experiment tracker."""
+    import glob
+    files = sorted(glob.glob(os.path.join(EVAL_DIR, "n5k_grounding*.jsonl")))
+    variants = {}
+    for path in files:
+        rows = _load_file(path)
+        if not rows:
+            continue
+        tag = rows[0].get("tag") or os.path.basename(path).replace("n5k_grounding", "").strip("_.jsonl") or "baseline"
+        variants[tag] = rows
+
+    if len(variants) < 1:
+        print("no results found"); return
+    print(f"{'variant':16s} {'n':>3s} {'model':22s} "
+          + "  ".join(f"{m[:4]:>6s}" for m in MACROS) + "   cooked-cal  sources")
+    for tag, rows in variants.items():
+        model = (rows[0].get("model") or "?")[:22]
+        meds = []
+        for m in MACROS:
+            e = [ape(r["pipeline"][m], r["gt"][m]) for r in rows if r["gt"][m]]
+            e = [x for x in e if x is not None]
+            meds.append(f"{statistics.median(e):6.1f}" if e else "   -- ")
+        cooked = [ape(r["pipeline"]["calories"], r["gt"]["calories"]) for r in rows
+                  if COOKED_RE.search(r["transcript"]) and r["gt"]["calories"]]
+        cooked = [x for x in cooked if x is not None]
+        cstr = f"{statistics.median(cooked):.1f}% (n={len(cooked)})" if cooked else "--"
+        src = {}
+        for r in rows:
+            for s, n in (r.get("sources") or {}).items():
+                src[s] = src.get(s, 0) + n
+        print(f"{tag:16s} {len(rows):>3d} {model:22s} " + "  ".join(meds)
+              + f"   {cstr:12s} {src}")
+
+    # Head-to-head on shared dishes: baseline vs each other variant (cooked focus).
+    base = {r["dish_id"]: r for r in variants.get("baseline", [])}
+    for tag, rows in variants.items():
+        if tag == "baseline" or not base:
+            continue
+        shared = [(base[r["dish_id"]], r) for r in rows if r["dish_id"] in base]
+        cooked_pairs = [(b, v) for b, v in shared if COOKED_RE.search(b["transcript"])]
+        print(f"\n--- baseline vs '{tag}' on {len(cooked_pairs)} shared COOKED dishes ---")
+        improved = worsened = 0
+        for b, v in cooked_pairs:
+            be = ape(b["pipeline"]["calories"], b["gt"]["calories"])
+            ve = ape(v["pipeline"]["calories"], v["gt"]["calories"])
+            if be is None or ve is None:
+                continue
+            improved += ve < be - 1
+            worsened += ve > be + 1
+            if abs(ve - be) > 5:
+                print(f"  {b['dish_id']}  gt {b['gt']['calories']:.0f}  base {b['pipeline']['calories']:.0f}"
+                      f"({be:.0f}%) -> {tag} {v['pipeline']['calories']:.0f}({ve:.0f}%)  "
+                      f"[{b['transcript'][:70]}]")
+        print(f"  cooked dishes improved: {improved}  worsened: {worsened}")
+
+
 async def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--n", type=int, default=50)
     ap.add_argument("--report", action="store_true")
+    ap.add_argument("--compare", action="store_true", help="matrix across all variant files")
+    ap.add_argument("--tag", default="", help="variant label -> n5k_grounding__<tag>.jsonl")
     ap.add_argument("--fresh", action="store_true", help="wipe scratch DB + results first")
     args = ap.parse_args()
 
+    global OUT_PATH, RUN_TAG
+    if args.tag:
+        RUN_TAG = args.tag
+        OUT_PATH = os.path.join(EVAL_DIR, f"n5k_grounding__{args.tag}.jsonl")
+    if args.compare:
+        compare()
+        return
     if args.report:
         report()
         return
