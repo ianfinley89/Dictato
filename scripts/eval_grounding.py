@@ -206,17 +206,33 @@ def ape(pred: float, gt: float) -> float | None:
     return round(abs(pred - gt) / gt * 100, 1) if gt else None
 
 
+def _ok(r: dict) -> bool:
+    """A usable result: entries produced, no agent/API error. A credit/API
+    failure is not a data point — it must be retried on resume. The summary
+    check catches legacy rows written before the error flags existed."""
+    if r.get("agent_error") or r.get("pipeline_error") or "hit an error" in (r.get("summary") or ""):
+        return False
+    return bool(r.get("pipeline"))
+
+
 def load_rows() -> list[dict]:
+    """Deduped by dish_id, last write wins (a retried dish supersedes its failure)."""
     if not os.path.exists(OUT_PATH):
         return []
+    by_id = {}
     with open(OUT_PATH, encoding="utf-8") as f:
-        return [json.loads(l) for l in f if l.strip()]
+        for line in f:
+            if line.strip():
+                r = json.loads(line)
+                by_id[r["dish_id"]] = r
+    return list(by_id.values())
 
 
 def report() -> None:
     rows = load_rows()
-    done = [r for r in rows if r.get("pipeline")]
-    print(f"rows: {len(rows)}  scored: {len(done)}  errors: {len(rows) - len(done)}")
+    done = [r for r in rows if _ok(r)]
+    print(f"rows: {len(rows)}  scored: {len(done)}  "
+          f"errored/excluded: {len(rows) - len(done)} (API/credit failures — re-run to retry)")
     if not done:
         return
 
@@ -282,14 +298,15 @@ async def main() -> None:
 
     dishes = fetch_metadata()
     random.Random(42).shuffle(dishes)
-    seen = {r["dish_id"] for r in load_rows()}
-    todo = [d for d in dishes if d["dish_id"] not in seen][: args.n - min(args.n, len(seen))]
-    print(f"eligible dishes: {len(dishes)}  already done: {len(seen)}  running: {len(todo)}")
+    done = {r["dish_id"] for r in load_rows() if _ok(r)}   # only SUCCESSFUL dishes count as done
+    todo = [d for d in dishes if d["dish_id"] not in done][: max(0, args.n - len(done))]
+    print(f"eligible dishes: {len(dishes)}  already done: {len(done)}  running: {len(todo)}")
     if not todo:
         report()
         return
 
     uid = ensure_user()
+    consec_err = 0
     with open(OUT_PATH, "a", encoding="utf-8") as out:
         for i, dish in enumerate(todo, 1):
             row = await run_dish(uid, dish)
@@ -300,6 +317,11 @@ async def main() -> None:
                   f"pipe {p.get('calories', '--')} | base "
                   f"{(row.get('baseline') or {}).get('calories', '--')} | "
                   f"src {row.get('sources')} | {row.get('latency_s', '?')}s")
+            consec_err = consec_err + 1 if not _ok(row) else 0
+            if consec_err >= 3:
+                print("\nABORTING: 3 consecutive failures (likely out of API credits or an "
+                      "outage). Fix, then re-run — failed dishes retry automatically.")
+                break
     report()
 
 

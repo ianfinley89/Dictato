@@ -126,6 +126,7 @@ async def run_item(uid: int, item: dict) -> dict:
         return row
     row["latency_s"] = round(time.time() - t0, 1)
     row["summary"] = (result.get("summary") or "")[:300]
+    row["errored"] = bool(result.get("error"))   # agent gave up (e.g. API/credit failure)
     entries = result.get("entries") or []
     row["n_entries"] = len(entries)
     row["pipeline_cal"] = round(sum(e.get("calories") or 0 for e in entries), 1)
@@ -148,11 +149,27 @@ async def run_item(uid: int, item: dict) -> dict:
     return row
 
 
+def _ok(r: dict) -> bool:
+    """A usable result: the agent actually produced entries and didn't error out
+    (a credit/API failure is NOT a data point — it must be retried on resume).
+    The summary check catches legacy rows written before the `errored` flag."""
+    if r.get("errored") or r.get("pipeline_error") or "hit an error" in (r.get("summary") or ""):
+        return False
+    return r.get("pipeline_cal") is not None
+
+
 def load_rows() -> list[dict]:
+    """Deduped by item name, last write wins (so a retried item supersedes its
+    earlier failure)."""
     if not os.path.exists(OUT_PATH):
         return []
+    by_name = {}
     with open(OUT_PATH, encoding="utf-8") as f:
-        return [json.loads(l) for l in f if l.strip()]
+        for line in f:
+            if line.strip():
+                r = json.loads(line)
+                by_name[r["name"]] = r
+    return list(by_name.values())
 
 
 def ape(pred, gt):
@@ -161,8 +178,9 @@ def ape(pred, gt):
 
 def report() -> None:
     rows = load_rows()
-    done = [r for r in rows if r.get("pipeline_cal") is not None]
-    print(f"items: {len(rows)}  scored: {len(done)}  errors: {len(rows) - len(done)}")
+    done = [r for r in rows if _ok(r)]
+    print(f"items: {len(rows)}  scored: {len(done)}  "
+          f"errored/excluded: {len(rows) - len(done)} (API/credit failures — re-run to retry)")
     if not done:
         return
 
@@ -225,13 +243,14 @@ async def main() -> None:
         sys.exit("ANTHROPIC_API_KEY missing")
 
     items = load_items()
-    seen = {r["name"] for r in load_rows()}
-    todo = [it for it in items if it["name"] not in seen][:max(0, args.n - len(seen))]
-    print(f"menu items: {len(items)}  done: {len(seen)}  running: {len(todo)}")
+    done = {r["name"] for r in load_rows() if _ok(r)}     # only SUCCESSFUL items count as done
+    todo = [it for it in items if it["name"] not in done][:max(0, args.n - len(done))]
+    print(f"menu items: {len(items)}  done: {len(done)}  running: {len(todo)}")
     if not todo:
         report(); return
 
     uid = ensure_user()
+    consec_err = 0
     with open(OUT_PATH, "a", encoding="utf-8") as out:
         for i, item in enumerate(todo, 1):
             row = await run_item(uid, item)
@@ -239,6 +258,11 @@ async def main() -> None:
             print(f"[{i}/{len(todo)}] {item['name'][:26]:26s} gt {item['cal_gt']:.0f} | "
                   f"pipe {row.get('pipeline_cal', '--')} | base {row.get('baseline_cal', '--')} | "
                   f"src {row.get('sources')} | {row.get('latency_s', '?')}s")
+            consec_err = consec_err + 1 if not _ok(row) else 0
+            if consec_err >= 3:
+                print("\nABORTING: 3 consecutive failures (likely out of API credits or an "
+                      "outage). Fix, then re-run — failed items retry automatically.")
+                break
     report()
 
 
