@@ -1,5 +1,6 @@
 """Tests for the agentic logging endpoint: fast path, tool execution, and the
 mocked model loop. No real Anthropic or Whisper calls."""
+import asyncio
 import io
 import json
 
@@ -210,16 +211,72 @@ def test_tool_log_food_servings_math(client):
     food_id = _seed_food(serving_g=9.0)
     from app.services.agent import _tool_log_food
     logged = []
-    out = _tool_log_food(uid, {"food_id": food_id, "servings": 3}, "voice", "note", logged)
+    out = asyncio.run(_tool_log_food(uid, {"food_id": food_id, "servings": 3}, "voice", "note", logged))
     assert out["logged"] and out["quantity_g"] == pytest.approx(27.0)
+    assert out["portion_basis"] == "count"
     assert len(logged) == 1
+    assert logged[0]["portion_confidence"] == "high"
 
 
 def test_tool_log_food_unknown_id_returns_error(client):
     uid = _register(client)
     from app.services.agent import _tool_log_food
-    out = _tool_log_food(uid, {"food_id": 99999, "quantity_g": 100}, "voice", None, [])
+    out = asyncio.run(_tool_log_food(uid, {"food_id": 99999, "quantity_g": 100}, "voice", None, []))
     assert "error" in out
+
+
+def test_tool_log_food_household_uses_usda_portion(client):
+    """The ladder's Menu-Match fix: 'a cup of rice' resolves through the food's
+    USDA portion weight, ignoring the model's inflated gram guess."""
+    uid = _register(client)
+    food_id = _seed_food(serving_g=None)
+    from app.database import get_conn
+    with get_conn() as conn:
+        conn.execute("UPDATE foods SET portions_json=? WHERE id=?",
+                     ('[{"unit": "cup", "qty": 1, "grams": 158.0, "desc": "1 cup"}]', food_id))
+    from app.services.agent import _tool_log_food
+    logged = []
+    out = asyncio.run(_tool_log_food(
+        uid, {"food_id": food_id, "quantity_g": 600, "basis": "household",
+              "household_qty": 1, "household_unit": "cup"}, "voice", None, logged))
+    assert out["logged"] and out["quantity_g"] == pytest.approx(158.0)
+    assert out["portion_basis"] == "household"
+
+
+def test_tool_log_food_estimate_flagged_low_confidence(client):
+    uid = _register(client)
+    food_id = _seed_food(serving_g=None)
+    from app.services.agent import _tool_log_food
+    logged = []
+    out = asyncio.run(_tool_log_food(
+        uid, {"food_id": food_id, "quantity_g": 250, "basis": "estimate"}, "voice", None, logged))
+    assert out["logged"] and out["portion_basis"] == "estimate"
+    assert logged[0]["portion_confidence"] == "low"
+
+
+def test_label_basis_downgraded_on_voice_kept_on_photo(client):
+    """A package label can only be READ in a photo — a voice claim of 'label'
+    is unearned confidence (Menu-Match finding) and drops to estimate."""
+    uid = _register(client)
+    food_id = _seed_food(serving_g=None)
+    from app.services.agent import _tool_log_food
+    inp = {"food_id": food_id, "quantity_g": 35, "basis": "label"}
+    voice = asyncio.run(_tool_log_food(uid, dict(inp), "voice", "beef jerky", []))
+    photo = asyncio.run(_tool_log_food(uid, dict(inp), "photo", "photo", []))
+    assert voice["portion_basis"] == "estimate"     # downgraded, grams unchanged
+    assert voice["quantity_g"] == pytest.approx(35.0)
+    assert photo["portion_basis"] == "label"        # legit in a photo
+
+
+def test_stated_basis_requires_number_in_words(client):
+    uid = _register(client)
+    food_id = _seed_food(serving_g=None)
+    from app.services.agent import _tool_log_food
+    inp = {"food_id": food_id, "quantity_g": 150, "basis": "stated"}
+    vague = asyncio.run(_tool_log_food(uid, dict(inp), "voice", "some chicken I guess", []))
+    exact = asyncio.run(_tool_log_food(uid, dict(inp), "voice", "150 grams of chicken", []))
+    assert vague["portion_basis"] == "estimate"
+    assert exact["portion_basis"] == "stated"
 
 
 # ── Mocked model loop (patches the provider-neutral llm.chat) ─────────────────

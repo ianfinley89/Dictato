@@ -443,11 +443,14 @@ function renderResultEntries(entries) {
   }
   wrap.innerHTML = entries.map(e => {
     const equiv = servingEquiv(e.quantity_g, e.serving_g, e.serving_desc);
+    // Portion-ladder confidence: flag guessed portions so Adjust gets aimed
+    // at the entries that actually need it.
+    const pflag = e.portion_confidence === 'low' ? ` · <span class="portion-flag">~portion guessed</span>` : '';
     return `
     <div class="result-entry" data-id="${e.id}">
       <div class="result-entry-info">
         <div class="result-entry-name">${esc(e.food_name)}${e.food_brand ? ' · ' + esc(e.food_brand) : ''}</div>
-        <div class="result-entry-meta">${Math.round(e.quantity_g)}g${equiv ? ` (${esc(equiv)})` : ''} · ${e.calories.toFixed(0)} cal · ${icon('db')} ${esc(e.food_source || '')}</div>
+        <div class="result-entry-meta">${Math.round(e.quantity_g)}g${equiv ? ` (${esc(equiv)})` : ''} · ${e.calories.toFixed(0)} cal · ${icon('db')} ${esc(e.food_source || '')}${pflag}</div>
       </div>
       <button class="result-adjust link-btn" data-id="${e.id}" data-food="${e.food_id}" data-qty="${e.quantity_g}">Adjust</button>
       <button class="result-undo link-btn" data-id="${e.id}">Undo</button>
@@ -902,7 +905,7 @@ $('voice-overlay-cancel').addEventListener('click', () => {
 });
 
 // ── Agent logging (voice/photo → auto-logged entries + result card) ──────────
-async function submitAgentLog({ audio = null, image = null, photoUrl = '' }) {
+async function submitAgentLog({ audio = null, image = null, photoUrl = '', text = null }) {
   showVoiceMsg(audio ? 'Transcribing & logging…' : 'Analyzing & logging…');
 
   const form = new FormData();
@@ -912,6 +915,7 @@ async function submitAgentLog({ audio = null, image = null, photoUrl = '' }) {
   if (reviseId) form.append('revise_capture_id', String(reviseId));
   if (audio) form.append('audio', audio, 'voice-note');
   if (image) form.append('image', image, 'meal.jpg');
+  if (text) form.append('text', text);   // optional photo context note
 
   let result;
   try {
@@ -952,13 +956,47 @@ photoInput.addEventListener('change', async () => {
     if (_currentPhotoUrl) URL.revokeObjectURL(_currentPhotoUrl);
     _currentPhotoUrl = URL.createObjectURL(blob);
 
-    await submitAgentLog({ image: blob, photoUrl: _currentPhotoUrl });
+    if (_reviseCaptureId) {
+      // Follow-up photos already carry the original capture's context.
+      await submitAgentLog({ image: blob, photoUrl: _currentPhotoUrl });
+    } else {
+      // Optional context note — what the camera can't see (oil, milk type,
+      // how much will be eaten) is the highest-value hint a photo can get.
+      openPhotoNote(blob);
+    }
   } catch (err) {
     voiceStatus.textContent = err.message;
     voiceStatus.classList.remove('hidden');
   } finally {
     photoBtn.classList.remove('busy');
   }
+});
+
+// ── Photo context note (one tap to skip: "Log it" with an empty note) ────────
+let _pendingPhoto = null;
+
+function openPhotoNote(blob) {
+  _pendingPhoto = blob;
+  voiceStatus.classList.add('hidden');
+  $('photo-note-input').value = '';
+  $('photo-note-overlay').classList.remove('hidden');
+  $('photo-note-input').focus();
+}
+
+async function submitPhotoNote() {
+  const note = $('photo-note-input').value.trim();
+  $('photo-note-overlay').classList.add('hidden');
+  const blob = _pendingPhoto;
+  _pendingPhoto = null;
+  if (!blob) return;
+  await submitAgentLog({ image: blob, text: note || null, photoUrl: _currentPhotoUrl });
+}
+
+$('photo-note-log').addEventListener('click', submitPhotoNote);
+$('photo-note-input').addEventListener('keydown', e => { if (e.key === 'Enter') submitPhotoNote(); });
+$('photo-note-cancel').addEventListener('click', () => {
+  _pendingPhoto = null;
+  $('photo-note-overlay').classList.add('hidden');
 });
 
 // Compress to JPEG with the longest edge capped at maxEdge (hard rule #3).

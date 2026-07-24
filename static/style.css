@@ -1079,6 +1079,11 @@ button:focus-visible, input:focus-visible, .chip:focus-visible {
   margin: 0 6px 6px 0;
 }
 
+.portion-flag {
+  color: var(--text-muted);
+  font-style: italic;
+}
+
 .ann-hint {
   font-size: 0.75rem;
   color: var(--text-muted);
@@ -1392,7 +1397,8 @@ button:focus-visible, input:focus-visible, .chip:focus-visible {
 
 /* ═══ Create-food & report-issue modals ═══ */
 #create-overlay,
-#issue-overlay {
+#issue-overlay,
+#photo-note-overlay {
   position: fixed;
   inset: 0;
   z-index: 850;

@@ -26,6 +26,7 @@ CREATE TABLE IF NOT EXISTS foods (
     brand TEXT,
     serving_desc TEXT,
     serving_g REAL,
+    portions_json TEXT,
     nutrients_json TEXT NOT NULL,
     expires_at TEXT,
     created_by_user_id INTEGER REFERENCES users(id),
@@ -247,6 +248,10 @@ def _migrate(conn) -> None:
         conn.execute("ALTER TABLE foods ADD COLUMN serving_g REAL")
     if "expires_at" not in food_cols:
         conn.execute("ALTER TABLE foods ADD COLUMN expires_at TEXT")
+    if "portions_json" not in food_cols:
+        # USDA foodPortions household measures, fetched lazily on first
+        # household-measure log (NULL = never fetched, '[]' = fetched, none).
+        conn.execute("ALTER TABLE foods ADD COLUMN portions_json TEXT")
     _backfill_serving_g(conn)
     _repair_nutrients(conn)
 

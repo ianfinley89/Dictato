@@ -21,12 +21,15 @@ Orange chicken at an asian restaurant") and run it through the production
     uv run python scripts/eval_menumatch.py --n 41        # run (resumable)
     uv run python scripts/eval_menumatch.py --report
     uv run python scripts/eval_menumatch.py --n 5 --fresh
+    uv run python scripts/eval_menumatch.py --tag ladder  # variant run
+    uv run python scripts/eval_menumatch.py --compare     # variant matrix
 
 Separate scratch DB from the Nutrition5k eval so its generic-food cache can't
 bias restaurant grounding. Real Anthropic + USDA/OFF calls; never the live DB.
 """
 import argparse
 import asyncio
+import glob
 import json
 import os
 import re
@@ -40,7 +43,9 @@ EVAL_DIR = os.path.join("data", "evals")
 MM_DIR = os.path.join(EVAL_DIR, "menumatch")
 ITEMS_PATH = os.path.join(MM_DIR, "items_info.txt")
 DB_PATH = os.path.join(EVAL_DIR, "mm_scratch.db")
+# Legacy path = the original (pre --tag) baseline run; --tag writes menumatch__<tag>.jsonl
 OUT_PATH = os.path.join(EVAL_DIR, "menumatch_grounding.jsonl")
+RUN_TAG = "baseline"
 
 os.makedirs(EVAL_DIR, exist_ok=True)
 os.environ["DATABASE_PATH"] = DB_PATH        # must precede any app import
@@ -110,10 +115,11 @@ async def probe_db_candidates(name: str, uid: int) -> list[str]:
 
 
 async def run_item(uid: int, item: dict) -> dict:
-    from app.services import agent
+    from app.services import agent, llm
     transcript = transcript_for(item)
     row = {"name": item["name"], "restaurant": item["restaurant"],
-           "cal_gt": item["cal_gt"], "transcript": transcript}
+           "cal_gt": item["cal_gt"], "transcript": transcript,
+           "tag": RUN_TAG, "model": llm._resolve_feature("voice")[1]}
     row["baseline_cal"] = await baseline_estimate(transcript)
 
     t0 = time.time()
@@ -131,7 +137,8 @@ async def run_item(uid: int, item: dict) -> dict:
     row["n_entries"] = len(entries)
     row["pipeline_cal"] = round(sum(e.get("calories") or 0 for e in entries), 1)
     row["entries"] = [{"name": e.get("food_name"), "grams": e.get("quantity_g"),
-                       "calories": e.get("calories"), "source": e.get("food_source_raw")}
+                       "calories": e.get("calories"), "source": e.get("food_source_raw"),
+                       "basis": e.get("portion_basis")}
                       for e in entries]
     src = {}
     for e in entries:
@@ -158,13 +165,14 @@ def _ok(r: dict) -> bool:
     return r.get("pipeline_cal") is not None
 
 
-def load_rows() -> list[dict]:
+def load_rows(path: str | None = None) -> list[dict]:
     """Deduped by item name, last write wins (so a retried item supersedes its
     earlier failure)."""
-    if not os.path.exists(OUT_PATH):
+    path = path or OUT_PATH
+    if not os.path.exists(path):
         return []
     by_name = {}
-    with open(OUT_PATH, encoding="utf-8") as f:
+    with open(path, encoding="utf-8") as f:
         for line in f:
             if line.strip():
                 r = json.loads(line)
@@ -224,13 +232,81 @@ def report() -> None:
               f"[{'; '.join(e['name'] for e in r['entries'])[:60]}]")
 
 
+def _variant_files() -> dict[str, list[dict]]:
+    files = {"baseline": os.path.join(EVAL_DIR, "menumatch_grounding.jsonl")}
+    for p in sorted(glob.glob(os.path.join(EVAL_DIR, "menumatch__*.jsonl"))):
+        files[os.path.basename(p)[len("menumatch__"):-len(".jsonl")]] = p
+    out = {}
+    for tag, path in files.items():
+        rows = [r for r in load_rows(path) if _ok(r)]
+        if rows:
+            out[tag] = rows
+    return out
+
+
+def compare() -> None:
+    """Variant x metrics matrix + per-item head-to-head when exactly 2 variants."""
+    variants = _variant_files()
+    if not variants:
+        print("no results"); return
+    print(f"{'variant':10s} {'model':34s} {'n':>3s} {'base%':>7s} {'pipe%':>7s}  sources | portion basis")
+    for tag, rows in variants.items():
+        model = (rows[0].get("model") or "haiku")[:34]
+        b = [ape(r["baseline_cal"], r["cal_gt"]) for r in rows]
+        p = [ape(r["pipeline_cal"], r["cal_gt"]) for r in rows]
+        b = [x for x in b if x is not None]
+        p = [x for x in p if x is not None]
+        src, basis = {}, {}
+        for r in rows:
+            for s, n in (r.get("sources") or {}).items():
+                src[s] = src.get(s, 0) + n
+            for e in r.get("entries") or []:
+                k = e.get("basis") or "?"
+                basis[k] = basis.get(k, 0) + 1
+        print(f"{tag:10s} {model:34s} {len(rows):>3d} {statistics.median(b):>6.1f}% "
+              f"{statistics.median(p):>6.1f}%  {src} | {basis}")
+
+    tags = list(variants)
+    if len(tags) == 2:
+        a, b = tags
+        amap = {r["name"]: r for r in variants[a]}
+        pairs = [(amap[r["name"]], r) for r in variants[b] if r["name"] in amap]
+        deltas = []
+        for x, y in pairs:
+            ex, ey = ape(x["pipeline_cal"], x["cal_gt"]), ape(y["pipeline_cal"], y["cal_gt"])
+            if ex is not None and ey is not None:
+                deltas.append((ey - ex, x, y))
+        improved = sum(1 for d, *_ in deltas if d < -2)
+        worsened = sum(1 for d, *_ in deltas if d > 2)
+        print(f"\n--- head-to-head ({a} -> {b}, shared {len(deltas)}): "
+              f"{improved} improved / {worsened} worsened / "
+              f"{len(deltas) - improved - worsened} unchanged (±2pt) ---")
+        for d, x, y in sorted(deltas, key=lambda t: t[0])[:6]:
+            print(f"  {d:+6.1f}pt  {x['name'][:26]:26s} gt {x['cal_gt']:.0f}: "
+                  f"{x['pipeline_cal']:.0f} -> {y['pipeline_cal']:.0f}")
+        for d, x, y in sorted(deltas, key=lambda t: -t[0])[:6]:
+            print(f"  {d:+6.1f}pt  {x['name'][:26]:26s} gt {x['cal_gt']:.0f}: "
+                  f"{x['pipeline_cal']:.0f} -> {y['pipeline_cal']:.0f}")
+
+
 async def main() -> None:
+    global OUT_PATH, RUN_TAG
     ap = argparse.ArgumentParser()
     ap.add_argument("--n", type=int, default=41)
     ap.add_argument("--report", action="store_true")
     ap.add_argument("--fresh", action="store_true")
+    ap.add_argument("--tag", default="")
+    ap.add_argument("--model", default="", help="override voice model, e.g. openrouter:deepseek/deepseek-chat")
+    ap.add_argument("--compare", action="store_true")
     args = ap.parse_args()
 
+    if args.tag:
+        RUN_TAG = args.tag
+        OUT_PATH = os.path.join(EVAL_DIR, f"menumatch__{args.tag}.jsonl")
+    if args.model:
+        os.environ["VOICE_MODEL"] = args.model
+    if args.compare:
+        compare(); return
     if args.report:
         report(); return
     if args.fresh:

@@ -5,6 +5,7 @@ from app.config import USDA_API_KEY
 from app.database import get_conn
 from app.services.fatsecret import search_fatsecret
 from app.services.nutrition_guard import sanitize_per_100g, KCAL_PER_KJ
+from app.services.portion import parse_usda_portions
 
 USDA_BASE = "https://api.nal.usda.gov/fdc/v1"
 OFF_BASE = "https://world.openfoodfacts.org/cgi/search.pl"
@@ -309,6 +310,7 @@ def get_food_by_id(food_id: int) -> Optional[dict]:
 
 def _row_to_food(row) -> dict:
     nutrients = json.loads(row["nutrients_json"])
+    portions_raw = row["portions_json"] if "portions_json" in row.keys() else None
     return {
         "id": row["id"],
         "source": row["source"],
@@ -319,4 +321,28 @@ def _row_to_food(row) -> dict:
         "serving_g": row["serving_g"],
         "created_by_user_id": row["created_by_user_id"],
         "nutrients_per_100g": nutrients,
+        # None = portions never fetched; [] = fetched, USDA has none.
+        "portions": json.loads(portions_raw) if portions_raw else None,
     }
+
+
+async def ensure_portions(food: dict) -> dict:
+    """Lazily fetch USDA foodPortions (household gram weights) for a usda food
+    the first time a household-measure log needs them; cached forever in
+    foods.portions_json. Non-USDA sources have no portion endpoint — no-op."""
+    if (food.get("portions") is not None or food.get("source") != "usda"
+            or not food.get("source_id") or not USDA_API_KEY):
+        return food
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            r = await client.get(f"{USDA_BASE}/food/{food['source_id']}",
+                                 params={"api_key": USDA_API_KEY})
+            r.raise_for_status()
+            portions = parse_usda_portions(r.json())
+    except Exception:
+        return food     # leave NULL so a later log retries
+    with get_conn() as conn:
+        conn.execute("UPDATE foods SET portions_json=? WHERE id=?",
+                     (json.dumps(portions), food["id"]))
+    food["portions"] = portions
+    return food

@@ -24,6 +24,7 @@ _AUDIO_MAX = 15 * 1024 * 1024  # a couple minutes of webm/opus or AAC
 _CAPTURE_ENTRY_KEYS = (
     "id", "food_name", "food_brand", "quantity_g", "food_source",
     "calories", "protein_g", "carbs_g", "fat_g", "fiber_g",
+    "portion_basis", "portion_confidence",
 )
 
 

@@ -12,15 +12,17 @@ user has logged before — no model call at all.
 """
 import base64
 import json
+import re
 from datetime import datetime, timedelta, timezone
 
 from app.database import get_conn
 from app.services import llm
 from app.services.ai_usage import record_tokens
-from app.services.food_lookup import search_foods, get_food_by_id
+from app.services.food_lookup import search_foods, get_food_by_id, ensure_portions
 from app.services.logging import (log_entry_for_user, update_entry_quantity,
                                   remove_entry, FoodNotFound)
 from app.services.nutrition_guard import sanitize_per_100g
+from app.services.portion import resolve_grams, guard_grams
 from app.services.profile import apply_profile_update
 from app.services.voice_parse import parse_local
 
@@ -152,16 +154,26 @@ _LOG_TOOL = {
     "name": "log_food",
     "description": (
         "Log a food the user ate — saves immediately, call once per item. "
-        "Give quantity_g (grams eaten), or servings when the food has a known serving_g."
+        "Report the portion you OBSERVED and the server does the gram math: "
+        "basis 'stated' (user said a weight) or 'label' (grams/oz printed on the "
+        "package) with quantity_g exact; basis 'count' with servings (units eaten, "
+        "e.g. 3 tacos); basis 'household' with household_qty + household_unit "
+        "('cup', 'tbsp', 'slice', 'fl oz', 'oz'...); basis 'estimate' when you can "
+        "only guess. ALWAYS also give quantity_g as your best-guess grams — it is "
+        "the fallback when a higher basis can't be resolved."
     ),
     "input_schema": {
         "type": "object",
         "properties": {
             "food_id": {"type": "integer"},
             "quantity_g": {"type": "number"},
+            "basis": {"type": "string",
+                      "enum": ["stated", "label", "count", "household", "estimate"]},
             "servings": {"type": "number"},
+            "household_qty": {"type": "number"},
+            "household_unit": {"type": "string"},
         },
-        "required": ["food_id"],
+        "required": ["food_id", "quantity_g", "basis"],
     },
 }
 
@@ -177,16 +189,19 @@ and recipes (listed below) when they fit.
 3. Composite or homemade dishes with no good prepared-dish candidate: break the dish \
 into its main ingredients, search each, and log each with realistic gram amounts for \
 the stated portion.
-4. Portions: when the user gives a count ("3 tacos") and the food has serving_g, log \
-with servings. Otherwise use realistic typical portions in grams. Restaurant portions \
-run LARGE and generic-database units run small: at a wing joint a "wing" is often a \
-WHOLE wing (drum + flat, ~90-120g each, not a ~30g segment), a basket of fries is \
-200-300g, a restaurant burrito 400g+. Size quantities for the restaurant's reality, \
-never package/USDA defaults. In a PHOTO, if an object of known size is in frame \
-(soda can, fork, credit card, standard ~27cm dinner plate), use it as a scale \
-reference for portion sizes and NAME it in your final sentence ("judging by the \
-fork, ..."); if none is present, estimate normally — never claim a reference you \
-don't clearly see.
+4. Portions: report what you OBSERVED via log_food's basis fields — a stated or \
+label weight, a count in servings, a household measure ("a cup of rice" -> \
+household_qty 1, household_unit "cup") — and let the server convert to grams; do \
+NOT convert household measures yourself. Unit SEMANTICS still matter: at a wing \
+joint a "wing" is a WHOLE wing (drum + flat, ~90-120g), not a ~30g segment; a \
+"burrito" at a burrito place is the whole 400g+ item. But do NOT inflate portions \
+by default: restaurant MAINS can run large, while sides, breads, rice, slaw and \
+small plates are ordinary single servings — when unsure, prefer the food's \
+serving_g or one typical serving. In a PHOTO, if an object of known size is in \
+frame (soda can, fork, credit card, standard ~27cm dinner plate), use it as a \
+scale reference for portion sizes and NAME it in your final sentence ("judging by \
+the fork, ..."); if none is present, estimate normally — never claim a reference \
+you don't clearly see.
 5. When a specific restaurant is named and there is no matching branded candidate, \
 web_search that restaurant's item FIRST — portion style (whole vs segments, basket \
 size, breaded or not) and published calorie estimates — then log the generic \
@@ -207,6 +222,17 @@ school" means they ride a bike — remember it silently, never comment on it).
 9. Your final message must be exactly ONE short, friendly sentence saying what you \
 logged (items and portions — no reasoning, no questions, no nutrition numbers, no \
 markdown)."""
+
+
+# Appended only for photo captures. Vision models tend to log the obvious/branded
+# items and skip the rest of a busy plate (e.g. grab the yogurt cup, miss the eggs,
+# sausage and biscuits beside it) — this pushes for full-plate coverage.
+_PHOTO_HINT = """
+
+PHOTO: scan the ENTIRE plate and frame and log EVERY distinct food and drink you \
+see — do not stop at the obvious, labeled, or branded item. A full meal often has a \
+hot main plus several sides (a protein, a starch, a vegetable, a drink); each is its \
+own log_food call. Missing half the plate is a worse error than a slightly-off portion."""
 
 
 def _user_context(user_id: int) -> str:
@@ -305,25 +331,47 @@ def _tool_create_food(user_id: int, inp: dict) -> dict:
     return {"food_id": food_id, "created": True, "source": source}
 
 
-def _tool_log_food(user_id: int, inp: dict, method: str, note: str | None, logged: list) -> dict:
+async def _tool_log_food(user_id: int, inp: dict, method: str, note: str | None, logged: list) -> dict:
     food_id = inp.get("food_id")
     food = get_food_by_id(food_id) if isinstance(food_id, int) else None
     if not food:
         return {"error": f"food_id {food_id} not found — search or create it first"}
-    servings = _num(inp.get("servings"))
-    quantity_g = _num(inp.get("quantity_g"))
-    if servings > 0 and food.get("serving_g"):
-        quantity_g = servings * food["serving_g"]
-    if quantity_g <= 0:
-        return {"error": "provide quantity_g in grams (this food has no serving_g for servings)"}
-    quantity_g = _clamp(quantity_g, 1, 5000)
+    # Deterministic basis verification (Menu-Match showed the model claiming
+    # 'label' on voice orders where no package exists): a label can only be READ
+    # in a photo, and 'stated' requires an actual number in the user's words.
+    # Downgrading only lowers confidence — the grams fall through unchanged.
+    basis = (inp.get("basis") or "").strip().lower()
+    if basis == "label" and method != "photo":
+        inp = {**inp, "basis": "estimate"}
+    elif basis == "stated" and not re.search(r"\d", note or ""):
+        # (Word-numbers like "half a pound" lose the high flag too — conservative
+        # by design; the grams are identical either way.)
+        inp = {**inp, "basis": "estimate"}
+    # A household observation may need the food's USDA portion weights — fetch once.
+    if _num(inp.get("household_qty")) > 0 and food.get("portions") is None:
+        food = await ensure_portions(food)
+    # The ladder does the mass math from the model's observation (hard rule: the
+    # model reports, deterministic code converts); the guard clamps implausibles.
+    res = resolve_grams(food, inp)
+    if res["grams"] <= 0:
+        return {"error": "provide quantity_g (your best-guess grams) — plus servings "
+                         "or household_qty/household_unit when you observed one"}
+    quantity_g, guard_note = guard_grams(food, res["grams"])
     try:
         entry = log_entry_for_user(user_id, food_id, round(quantity_g, 1), method, notes=note)
     except FoodNotFound:
         return {"error": f"food_id {food_id} not found"}
+    # Ride along into the response + capture_log so the UI can show WHY a portion
+    # is uncertain and the evals can bucket error by rung.
+    entry["portion_basis"] = res["basis"]
+    entry["portion_confidence"] = res["confidence"]
     logged.append(entry)
-    return {"logged": True, "entry_id": entry["id"], "name": entry["food_name"],
-            "quantity_g": entry["quantity_g"], "calories": entry["calories"]}
+    out = {"logged": True, "entry_id": entry["id"], "name": entry["food_name"],
+           "quantity_g": entry["quantity_g"], "calories": entry["calories"],
+           "portion_basis": res["basis"]}
+    if guard_note:
+        out["note"] = guard_note
+    return out
 
 
 _MEALS = {"breakfast", "lunch", "dinner", "snack", "drink"}
@@ -384,7 +432,7 @@ async def _execute_tool(name: str, inp: dict, user_id: int, method: str,
             return {"error": f"food_id {fid} is already logged as entry "
                              f"{existing_food_ids[fid]} — use update_entry with the "
                              f"new TOTAL grams instead of logging it again"}
-        return _tool_log_food(user_id, inp, method, note, logged)
+        return await _tool_log_food(user_id, inp, method, note, logged)
     if name == "annotate_capture":
         return _tool_annotate(user_id, inp, annotation)
     if name == "update_entry":
@@ -413,7 +461,11 @@ async def run_agent(user_id: int, *, text: str | None = None,
     """Run the logging loop. `revision` = {entries, transcript} switches to
     reconcile-an-existing-log mode. Returns {summary, entries, annotation, turns}."""
     user_text = None
-    if text:
+    if text and image and not revision:
+        # Photo capture with the optional context note — what the camera can't
+        # see (cooking fat, milk type, how much was eaten) lives in the note.
+        user_text = f"Log this meal photo. The user's note about it: {text}"
+    elif text:
         user_text = f"Transcript: {text}"
     elif image:
         user_text = "Log this meal photo." if not revision else "Here's a photo of the meal I just logged."
@@ -426,6 +478,8 @@ async def run_agent(user_id: int, *, text: str | None = None,
     note = (text or "photo")[:_MAX_NOTE]
     system = (_SYSTEM + f"\n\nUser's local time: {local_now.strftime('%A %H:%M')}."
               + _user_context(user_id))
+    if image:
+        system += _PHOTO_HINT
     tools = [_SEARCH_TOOL, _CREATE_TOOL, _LOG_TOOL, _ANNOTATE_TOOL, _WEB_SEARCH_TOOL]
     existing_food_ids = None
     if revision:
