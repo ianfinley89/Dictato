@@ -138,7 +138,7 @@ async def run_item(uid: int, item: dict) -> dict:
     row["pipeline_cal"] = round(sum(e.get("calories") or 0 for e in entries), 1)
     row["entries"] = [{"name": e.get("food_name"), "grams": e.get("quantity_g"),
                        "calories": e.get("calories"), "source": e.get("food_source_raw"),
-                       "basis": e.get("portion_basis")}
+                       "basis": e.get("portion_basis"), "snapped": e.get("portion_snapped")}
                       for e in entries]
     src = {}
     for e in entries:
@@ -263,6 +263,8 @@ def compare() -> None:
             for e in r.get("entries") or []:
                 k = e.get("basis") or "?"
                 basis[k] = basis.get(k, 0) + 1
+                if e.get("snapped"):
+                    basis["snapped"] = basis.get("snapped", 0) + 1
         print(f"{tag:10s} {model:34s} {len(rows):>3d} {statistics.median(b):>6.1f}% "
               f"{statistics.median(p):>6.1f}%  {src} | {basis}")
 

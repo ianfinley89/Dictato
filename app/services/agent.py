@@ -22,7 +22,7 @@ from app.services.food_lookup import search_foods, get_food_by_id, ensure_portio
 from app.services.logging import (log_entry_for_user, update_entry_quantity,
                                   remove_entry, FoodNotFound)
 from app.services.nutrition_guard import sanitize_per_100g
-from app.services.portion import resolve_grams, guard_grams
+from app.services.portion import resolve_grams, guard_grams, snap_estimate
 from app.services.profile import apply_profile_update
 from app.services.voice_parse import parse_local
 
@@ -356,7 +356,15 @@ async def _tool_log_food(user_id: int, inp: dict, method: str, note: str | None,
     if res["grams"] <= 0:
         return {"error": "provide quantity_g (your best-guess grams) — plus servings "
                          "or household_qty/household_unit when you observed one"}
+    # Blind estimates get snapped against the food's own household portion
+    # weights (down-only) — the Menu-Match side-overshoot fix.
+    snap_note = None
+    if res["basis"] == "estimate":
+        if food.get("portions") is None:
+            food = await ensure_portions(food)
+        res["grams"], snap_note = snap_estimate(food, res["grams"])
     quantity_g, guard_note = guard_grams(food, res["grams"])
+    guard_note = guard_note or snap_note
     try:
         entry = log_entry_for_user(user_id, food_id, round(quantity_g, 1), method, notes=note)
     except FoodNotFound:
@@ -365,6 +373,7 @@ async def _tool_log_food(user_id: int, inp: dict, method: str, note: str | None,
     # is uncertain and the evals can bucket error by rung.
     entry["portion_basis"] = res["basis"]
     entry["portion_confidence"] = res["confidence"]
+    entry["portion_snapped"] = bool(snap_note)
     logged.append(entry)
     out = {"logged": True, "entry_id": entry["id"], "name": entry["food_name"],
            "quantity_g": entry["quantity_g"], "calories": entry["calories"],

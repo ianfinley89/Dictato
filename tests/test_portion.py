@@ -1,6 +1,7 @@
 """Portion ladder: the model reports observations, this math must be exact."""
 from app.services.portion import (
     parse_usda_portions, match_household, resolve_grams, guard_grams,
+    snap_estimate,
 )
 
 RICE = {"id": 1, "name": "Rice, white, cooked", "serving_g": None,
@@ -109,6 +110,37 @@ def test_parse_fraction_description():
 def test_match_household_no_match():
     assert match_household(RICE["portions"], 1, "slice") is None
     assert match_household(None, 1, "cup") is None
+
+
+# ── Estimate snapping (down-only, blind guesses vs household reality) ────────
+def test_snap_caps_overshoot():
+    g, note = snap_estimate(RICE, 534)          # the Menu-Match jasmine case
+    assert g == 2 * 158.0 and "capped" in note
+
+
+def test_snap_leaves_plausible_estimates_alone():
+    assert snap_estimate(RICE, 200) == (200, None)
+
+
+def test_snap_never_raises_a_low_guess():
+    assert snap_estimate(RICE, 50) == (50, None)
+
+
+def test_snap_falls_back_to_serving_g_for_branded_rows():
+    """Branded USDA rows have no foodPortions but DO have serving_g — a blind
+    guess must not sail past the row's own serving size (the pizza case)."""
+    g, note = snap_estimate(TACO, 900)               # portions None, serving_g 102
+    assert g == 2 * 102.0 and "serving" in note
+
+
+def test_snap_noop_without_any_anchor():
+    assert snap_estimate(PLAIN, 900) == (900, None)  # no portions, no serving_g
+
+
+def test_snap_normalizes_fractional_portion_qty():
+    food = {"portions": [{"unit": "cup", "qty": 0.5, "grams": 79.0}]}
+    g, note = snap_estimate(food, 500)
+    assert g == 2 * (79.0 / 0.5)                # per-UNIT weight, not per-row
 
 
 # ── Guard ────────────────────────────────────────────────────────────────────

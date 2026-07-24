@@ -158,6 +158,33 @@ def resolve_grams(food: dict, inp: dict) -> dict:
     return {"grams": 0.0, "basis": "none", "confidence": "low", "note": None}
 
 
+_SNAP_MULT = 2.0
+
+
+def snap_estimate(food: dict, grams: float) -> tuple[float, str | None]:
+    """Down-only cap for BLIND estimates: when the model is guessing (basis
+    'estimate'), no guess may exceed 2x the food's own portion anchor —
+    the largest single household portion weight when USDA has them (generic
+    FNDDS/SR rows), else the row's serving_g (branded rows have no
+    foodPortions but DO know their serving size; a 680g 'cheese pizza' guess
+    should not sail past a row that says a serving is 140g). Never touches
+    stated/count/household resolutions and never raises a low guess — the
+    tool-result note tells the model it was capped, so if it truly knows more
+    it can re-log with count/stated."""
+    per_unit = [p["grams"] / p["qty"] for p in food.get("portions") or []
+                if p.get("qty") and p.get("grams")]
+    if per_unit:
+        anchor, kind = max(per_unit), "largest household portion"
+    elif food.get("serving_g"):
+        anchor, kind = food["serving_g"], "serving"
+    else:
+        return grams, None
+    cap = _SNAP_MULT * anchor
+    if grams > cap:
+        return cap, f"estimate capped at {_SNAP_MULT:g}x the {kind} ({cap:.0f}g)"
+    return grams, None
+
+
 def guard_grams(food: dict, grams: float) -> tuple[float, str | None]:
     """Deterministic plausibility clamp on the resolved mass."""
     note = None

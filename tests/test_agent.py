@@ -268,6 +268,30 @@ def test_label_basis_downgraded_on_voice_kept_on_photo(client):
     assert photo["portion_basis"] == "label"        # legit in a photo
 
 
+def test_estimate_snapped_to_household_portion_but_count_is_not(client):
+    """Blind estimates get the down-only 2x-portion cap; a real count the user
+    stated must NEVER be snapped, however large."""
+    uid = _register(client)
+    # Generic FNDDS-style row: household portions but NO serving_g (the real
+    # shape of "Rice, white, cooked" — nothing anchors an estimate but the snap).
+    rice_id = _seed_food(name="jasmine rice", serving_g=None)
+    from app.database import get_conn
+    with get_conn() as conn:
+        conn.execute("UPDATE foods SET portions_json=? WHERE id=?",
+                     ('[{"unit": "cup", "qty": 1, "grams": 158.0, "desc": "1 cup"}]', rice_id))
+    from app.services.agent import _tool_log_food
+    est = asyncio.run(_tool_log_food(
+        uid, {"food_id": rice_id, "quantity_g": 534, "basis": "estimate"}, "voice", None, []))
+    assert est["quantity_g"] == pytest.approx(316.0)         # 2 x 158, the snap
+    # A counted portion is never snapped (guard's own 20x serving cap still applies).
+    cake_id = _seed_food(name="rice cake", serving_g=9.0)
+    counted = asyncio.run(_tool_log_food(
+        uid, {"food_id": cake_id, "quantity_g": 534, "basis": "count", "servings": 40},
+        "voice", None, []))
+    assert counted["quantity_g"] == pytest.approx(180.0)     # guard's 20x serving cap, not snap
+    assert counted["portion_basis"] == "count"
+
+
 def test_stated_basis_requires_number_in_words(client):
     uid = _register(client)
     food_id = _seed_food(serving_g=None)
