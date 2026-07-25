@@ -150,6 +150,20 @@ CREATE TABLE IF NOT EXISTS user_profile (
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+-- Weigh-ins, mostly captured passively from speech ("I weighed 182 today").
+-- Canonical kg; `unit` remembers how the user says it. One per user/day/source.
+CREATE TABLE IF NOT EXISTS weigh_ins (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL REFERENCES users(id),
+    weight_kg REAL NOT NULL,
+    unit TEXT NOT NULL DEFAULT 'lb',
+    measured_at TEXT NOT NULL DEFAULT (datetime('now')),
+    source TEXT NOT NULL DEFAULT 'manual',
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_weigh_ins_user ON weigh_ins(user_id, measured_at);
+
 -- Coach chat history so conversations persist across sessions.
 CREATE TABLE IF NOT EXISTS coach_messages (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

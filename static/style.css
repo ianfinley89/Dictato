@@ -1084,6 +1084,18 @@ button:focus-visible, input:focus-visible, .chip:focus-visible {
   font-style: italic;
 }
 
+.weight-unit {
+  background: rgba(0,0,0,0.28);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 10px;
+  padding: 10px;
+  font-size: 0.95rem;
+}
+
+#weight-form input[type="number"] { flex: 1; }
+#weight-form .btn-secondary { width: auto; white-space: nowrap; }
+
 .ann-hint {
   font-size: 0.75rem;
   color: var(--text-muted);

@@ -16,6 +16,7 @@ from app.database import get_conn
 from app.services import llm
 from app.services.ai_usage import record_tokens
 from app.services.profile import get_profile, merge_facts, apply_profile_update
+from app.services.weight import recent_weights, LB_PER_KG
 
 # Back-compat aliases (tests and older callers use the underscored names).
 _merge_facts = merge_facts
@@ -183,10 +184,20 @@ def _build_context(uid: int, profile: dict) -> str:
             n["specificity"] = r["specificity"]
         recent_notes.append(n)
 
+    # Weigh-ins are recorded deterministically (passively from speech or the
+    # Settings field) — pass them so the coach never asks for a weight we already
+    # have, and can use the real number in calc_targets.
+    weights = [{"date": w["measured_at"][:10],
+                "lb": round(w["weight_kg"] * LB_PER_KG, 1),
+                "kg": round(w["weight_kg"], 1)}
+               for w in recent_weights(uid, days=120, limit=12)]
+
     return (
         f"USER: {u['display_name'] if u else 'there'}\n"
         f"GOALS (per day): {json.dumps(goals)}\n"
         f"PROFILE (facts remembered so far): {json.dumps(profile) if profile else '(nothing yet)'}\n"
+        f"WEIGH-INS (newest first, recorded — do NOT ask for these): "
+        f"{json.dumps(weights) if weights else '(none yet)'}\n"
         f"DAILY TOTALS (last 14 days): {json.dumps(daily) if daily else '(no food logged yet)'}\n"
         f"RECENT NOTES (what they said when logging): {json.dumps(recent_notes) if recent_notes else '(none)'}"
     )

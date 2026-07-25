@@ -29,6 +29,14 @@ def get_profile(uid: int) -> dict:
 def apply_profile_update(uid: int, facts: dict) -> None:
     if not facts:
         return
+    # Weight is the one fact with real math riding on it (bias correction), so it
+    # is mirrored into the canonical weigh_ins table. This is the single choke
+    # point for both writers — the coach and the logging agent's observed_facts.
+    try:
+        from app.services.weight import record_from_facts
+        record_from_facts(uid, facts)
+    except Exception:
+        pass        # remembering the fact must never fail on the mirror
     merged = merge_facts(get_profile(uid), facts)
     now = datetime.now(timezone.utc).isoformat()
     with get_conn() as conn:

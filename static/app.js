@@ -1056,6 +1056,7 @@ async function showPane(name) {
     prefillGoals();
     renderAccount();
     initReminders();
+    loadWeights();
   } else if (name === 'admin') {
     await loadAdmin();
   }
@@ -1573,6 +1574,52 @@ async function enablePush() {
     setPushStatus(`Could not enable: ${err.message}`, 'err');
   }
 }
+
+// ── Weight (the passive path fills this; the form is a fallback) ─────────────
+const LB_PER_KG = 2.20462;
+
+function fmtWeight(w) {
+  return w.unit === 'kg' ? `${w.weight_kg.toFixed(1)} kg`
+                         : `${(w.weight_kg * LB_PER_KG).toFixed(1)} lb`;
+}
+
+async function loadWeights() {
+  const list = $('weight-list');
+  if (!list) return;
+  try {
+    const { recent } = await api.get('/api/auth/weight');
+    if (!recent.length) {
+      list.innerHTML = '<p class="reminders-intro">No weigh-ins yet.</p>';
+      return;
+    }
+    list.innerHTML = recent.slice(0, 10).map(w => `
+      <div class="reminder-row" data-id="${w.id}">
+        <span class="reminder-time-label">${esc(fmtWeight(w))}</span>
+        <span class="portion-flag">${esc(w.measured_at.slice(0, 10))}${w.source !== 'manual' ? ' · ' + esc(w.source) : ''}</span>
+        <button class="reminder-del" title="Remove">${icon('x')}</button>
+      </div>`).join('');
+    list.querySelectorAll('.reminder-row').forEach(row => {
+      row.querySelector('.reminder-del').addEventListener('click', async () => {
+        try { await api.del(`/api/auth/weight/${row.dataset.id}`); loadWeights(); }
+        catch (err) { showToast(err.message, 'error'); }
+      });
+    });
+  } catch (err) {
+    list.innerHTML = `<p class="push-status err">${esc(err.message)}</p>`;
+  }
+}
+
+$('weight-form').addEventListener('submit', async e => {
+  e.preventDefault();
+  const value = parseFloat($('weight-value').value);
+  if (!value) return;
+  try {
+    await api.post('/api/auth/weight', { value, unit: $('weight-unit').value });
+    $('weight-value').value = '';
+    showToast('Weight saved');
+    loadWeights();
+  } catch (err) { showToast(err.message, 'error'); }
+});
 
 function showReminderControls() {
   $('enable-push-btn').classList.add('hidden');

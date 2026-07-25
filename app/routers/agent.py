@@ -10,6 +10,8 @@ from app.auth import get_current_user_id
 from app.services import agent, stt
 from app.services.ai_usage import check_and_increment, get_today_usage
 from app.services.logging import current_entries
+from app.services.weight import (parse_weight, record_weight, latest_weight,
+                                 is_weight_only)
 from app.database import get_conn
 from app.config import ANTHROPIC_API_KEY, AI_DAILY_LIMIT
 
@@ -164,6 +166,23 @@ async def agent_log(
                     "entries": current_entries(uid, original_ids),
                     "original_ids": original_ids}
 
+    # Passive weigh-in capture: "I weighed 182 this morning" is recorded from the
+    # words the user already said — no field to fill in, no model tokens. If the
+    # capture was ONLY that, there is no food to log and we return here.
+    weighed = None
+    if transcript and revision is None:
+        w = parse_weight(transcript, (latest_weight(uid) or {}).get("weight_kg"))
+        if w:
+            record_weight(uid, w["weight_kg"], w["unit"], source=input_type)
+            weighed = w
+            if not image_bytes and is_weight_only(transcript, w["span"]):
+                summary = f"Recorded your weight: {w['display']}."
+                capture_id = _record_capture(uid, input_type, transcript, summary, [],
+                                             fast_path=True, audio_path=audio_path)
+                return {"capture_id": capture_id, "transcript": transcript,
+                        "summary": summary, "entries": [], "annotation": {},
+                        "fast_path": True, "weight": w["display"]}
+
     # Zero-cost fast path: every item matches a food this user already knows.
     # (Revisions always need the model — they reconcile, not just match.)
     if transcript and not image_bytes and revision is None:
@@ -171,12 +190,15 @@ async def agent_log(
         if entries:
             names = ", ".join(e["food_name"] for e in entries)
             summary = f"Logged {names}."
+            if weighed:
+                summary += f" Weight noted: {weighed['display']}."
             annotation = agent.fast_path_annotation(transcript, entries, tz_offset)
             capture_id = _record_capture(uid, input_type, transcript, summary, entries,
                                          fast_path=True, annotation=annotation,
                                          audio_path=audio_path)
             return {"capture_id": capture_id, "transcript": transcript, "summary": summary,
-                    "entries": entries, "annotation": annotation, "fast_path": True}
+                    "entries": entries, "annotation": annotation, "fast_path": True,
+                    **({"weight": weighed["display"]} if weighed else {})}
 
     if not ANTHROPIC_API_KEY:
         raise HTTPException(503, "AI logging is not configured.")
@@ -207,12 +229,16 @@ async def agent_log(
                 "entries": entries, "annotation": result.get("annotation") or {},
                 "fast_path": False, "revised": True}
 
-    capture_id = _record_capture(uid, input_type, transcript, result["summary"], result["entries"],
+    summary = result["summary"]
+    if weighed:
+        summary += f" Weight noted: {weighed['display']}."
+    capture_id = _record_capture(uid, input_type, transcript, summary, result["entries"],
                                  fast_path=False, annotation=result.get("annotation"),
                                  photo_path=photo_path, audio_path=audio_path)
-    return {"capture_id": capture_id, "transcript": transcript, "summary": result["summary"],
+    return {"capture_id": capture_id, "transcript": transcript, "summary": summary,
             "entries": result["entries"], "annotation": result.get("annotation") or {},
-            "fast_path": False}
+            "fast_path": False,
+            **({"weight": weighed["display"]} if weighed else {})}
 
 
 @router.get("/usage")

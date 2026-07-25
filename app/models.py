@@ -34,6 +34,11 @@ class GoalsUpdate(BaseModel):
     fat_g: Optional[float] = None
 
 
+class WeightIn(BaseModel):
+    value: float           # in `unit`; stored canonically as kg
+    unit: Optional[str] = "lb"
+
+
 class DeleteAccountRequest(BaseModel):
     password: str          # re-confirmed so a stolen session can't wipe data
 

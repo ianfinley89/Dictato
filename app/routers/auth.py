@@ -1,7 +1,10 @@
 from fastapi import APIRouter, HTTPException, Response, Request
-from app.models import RegisterRequest, LoginRequest, GoalsUpdate, DeleteAccountRequest
+from app.models import (RegisterRequest, LoginRequest, GoalsUpdate,
+                        DeleteAccountRequest, WeightIn)
 from app.auth import hash_password, verify_password, make_session_token, get_current_user_id
 from app.database import get_conn
+from app.services.weight import (record_weight, latest_weight, recent_weights,
+                                 LB_PER_KG)
 from app.config import SESSION_COOKIE_NAME, SECURE_COOKIES, ADMIN_EMAILS
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
@@ -68,6 +71,35 @@ async def update_goals(req: GoalsUpdate, request: Request):
     return dict(row)
 
 
+@router.get("/weight")
+async def get_weight(request: Request):
+    """Weigh-in history. Most entries arrive passively from speech; this also
+    backs the Settings field for anyone who'd rather type it."""
+    uid = get_current_user_id(request)
+    return {"latest": latest_weight(uid), "recent": recent_weights(uid)}
+
+
+@router.post("/weight")
+async def add_weight(req: WeightIn, request: Request):
+    uid = get_current_user_id(request)
+    unit = "kg" if (req.unit or "lb").lower().startswith("k") else "lb"
+    kg = req.value if unit == "kg" else req.value / LB_PER_KG
+    if not (20.0 <= kg <= 350.0):
+        raise HTTPException(400, "That weight looks out of range.")
+    entry = record_weight(uid, kg, unit, source="manual")
+    return {"ok": True, "entry": entry, "recent": recent_weights(uid)}
+
+
+@router.delete("/weight/{weigh_in_id}")
+async def delete_weight(weigh_in_id: int, request: Request):
+    uid = get_current_user_id(request)
+    with get_conn() as conn:
+        cur = conn.execute("DELETE FROM weigh_ins WHERE id=? AND user_id=?", (weigh_in_id, uid))
+        if not cur.rowcount:
+            raise HTTPException(404, "Weigh-in not found")
+    return {"ok": True, "recent": recent_weights(uid)}
+
+
 @router.delete("/account")
 async def delete_account(req: DeleteAccountRequest, request: Request, response: Response):
     """Delete the account and every row of the user's data. Their private foods
@@ -92,6 +124,7 @@ async def delete_account(req: DeleteAccountRequest, request: Request, response: 
         conn.execute("DELETE FROM ai_usage WHERE user_id=?", (uid,))
         conn.execute("DELETE FROM capture_log WHERE user_id=?", (uid,))
         conn.execute("DELETE FROM user_profile WHERE user_id=?", (uid,))
+        conn.execute("DELETE FROM weigh_ins WHERE user_id=?", (uid,))
         conn.execute("DELETE FROM coach_messages WHERE user_id=?", (uid,))
         conn.execute("DELETE FROM model_traces WHERE user_id=?", (uid,))
         conn.execute("DELETE FROM issue_reports WHERE user_id=?", (uid,))

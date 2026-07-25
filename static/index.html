@@ -229,6 +229,21 @@
     </form>
   </section>
 
+  <!-- Weight: passive first, this field is the fallback -->
+  <section class="dash-section">
+    <p class="section-heading">Weight</p>
+    <p class="reminders-intro">You don't need this form — just say it while logging ("I weighed 182 this morning") or mention it to the coach, and it's saved automatically.</p>
+    <form id="weight-form" class="reminder-add">
+      <input type="number" id="weight-value" step="0.1" min="20" max="800" placeholder="e.g. 182" inputmode="decimal">
+      <select id="weight-unit" class="weight-unit">
+        <option value="lb">lb</option>
+        <option value="kg">kg</option>
+      </select>
+      <button type="submit" class="btn-secondary">Save</button>
+    </form>
+    <div id="weight-list"></div>
+  </section>
+
   <!-- Reminders / push notifications -->
   <section class="dash-section">
     <p class="section-heading">Notifications</p>
