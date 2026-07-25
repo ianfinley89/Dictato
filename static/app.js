@@ -402,6 +402,7 @@ function showResultCard(result, photoUrl = '') {
   t.classList.toggle('hidden', !showTranscript);
   renderResultAnnotation(result.annotation || {}, !!photoUrl);
   renderResultEntries(result.entries || []);
+  renderClarify(result);
   // Follow-ups refine THIS capture ("say more" after a photo, photo after voice).
   $('result-followup').classList.toggle('hidden', !result.capture_id);
   $('result-card').classList.remove('hidden');
@@ -416,6 +417,47 @@ $('followup-voice').addEventListener('click', () => {
 $('followup-photo').addEventListener('click', () => {
   _reviseCaptureId = _lastResult && _lastResult.capture_id;
   photoInput.click();
+});
+
+// Offer help only when the server's deterministic score says this capture is
+// shaky — nothing logged, the model asked a question, or the calories rest on
+// guessed portions. Never on a clean log, or the strip becomes wallpaper.
+function renderClarify(result) {
+  const c = result.confidence || {};
+  const el = $('result-clarify');
+  const show = !!c.clarify && !!result.capture_id;
+  el.classList.toggle('hidden', !show);
+  if (!show) return;
+  const nothing = c.reason === 'nothing-logged' || c.reason === 'model-asked-a-question';
+  $('clarify-msg').textContent = nothing
+    ? "I couldn't log that confidently. Tell me a bit more — say it or type it."
+    : 'These portions are guesses. Say more or type a detail and I\'ll fix them.';
+  $('clarify-text').value = '';
+}
+
+$('clarify-form').addEventListener('submit', async e => {
+  e.preventDefault();
+  const text = $('clarify-text').value.trim();
+  if (!text || !_lastResult || !_lastResult.capture_id) return;
+  const form = new FormData();
+  form.append('tz_offset', String(new Date().getTimezoneOffset()));
+  form.append('revise_capture_id', String(_lastResult.capture_id));
+  form.append('text', text);
+  $('clarify-text').value = '';
+  showVoiceMsg('Updating…');
+  try {
+    const r = await fetch('/api/agent/log', { method: 'POST', credentials: 'same-origin', body: form });
+    if (!r.ok) {
+      const err = await r.json().catch(() => ({ detail: r.statusText }));
+      throw new Error(err.detail || 'Update failed');
+    }
+    const data = await r.json();
+    voiceStatus.classList.add('hidden');
+    await goToToday();
+    showResultCard(data);      // a typed clarification adds no new photo
+  } catch (err) {
+    showVoiceMsg(err.message, 8000);
+  }
 });
 
 // Meal / tag chips + a gentle nudge when the capture was vague.

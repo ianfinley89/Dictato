@@ -13,6 +13,13 @@ ANTHROPIC_API_KEY: str = os.getenv("ANTHROPIC_API_KEY", "")
 SECRET_KEY: str = os.getenv("SECRET_KEY", "change-me-use-a-long-random-string-in-production")
 SESSION_COOKIE_NAME: str = "dictato_session"
 AI_DAILY_LIMIT: int = int(os.getenv("AI_DAILY_LIMIT", "20"))
+
+# Offer "say more / type it" when a capture's deterministic confidence falls below
+# this. The score is coarse by nature (it comes from a few discrete facts —
+# see services/confidence.py), so useful values are ~0.1 (only failed captures),
+# 0.5 (also invented nutrition and clamped guesses; ~17% of Menu-Match), and
+# 0.7+ (every guessed portion — noisy enough to become wallpaper).
+CLARIFY_THRESHOLD: float = float(os.getenv("CLARIFY_THRESHOLD", "0.5"))
 SECURE_COOKIES: bool = os.getenv("SECURE_COOKIES", "false").lower() == "true"
 VAPID_PRIVATE_KEY: str = os.getenv("VAPID_PRIVATE_KEY", "")
 VAPID_PUBLIC_KEY: str = os.getenv("VAPID_PUBLIC_KEY", "")

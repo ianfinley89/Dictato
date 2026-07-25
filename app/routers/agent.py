@@ -13,7 +13,8 @@ from app.services.logging import current_entries
 from app.services.weight import (parse_weight, record_weight, latest_weight,
                                  is_weight_only)
 from app.database import get_conn
-from app.config import ANTHROPIC_API_KEY, AI_DAILY_LIMIT
+from app.config import ANTHROPIC_API_KEY, AI_DAILY_LIMIT, CLARIFY_THRESHOLD
+from app.services.confidence import needs_clarification
 
 router = APIRouter(prefix="/api/agent", tags=["agent"])
 
@@ -227,7 +228,9 @@ async def agent_log(
                 "transcript": transcript or revision.get("transcript"),
                 "summary": result["summary"],
                 "entries": entries, "annotation": result.get("annotation") or {},
-                "fast_path": False, "revised": True}
+                "fast_path": False, "revised": True,
+                "confidence": needs_clarification(entries, result["summary"],
+                                                  CLARIFY_THRESHOLD)}
 
     summary = result["summary"]
     if weighed:
@@ -238,6 +241,8 @@ async def agent_log(
     return {"capture_id": capture_id, "transcript": transcript, "summary": summary,
             "entries": result["entries"], "annotation": result.get("annotation") or {},
             "fast_path": False,
+            "confidence": needs_clarification(result["entries"], result["summary"],
+                                              CLARIFY_THRESHOLD),
             **({"weight": weighed["display"]} if weighed else {})}
 
 
