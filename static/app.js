@@ -402,7 +402,7 @@ function showResultCard(result, photoUrl = '') {
   t.classList.toggle('hidden', !showTranscript);
   renderResultAnnotation(result.annotation || {}, !!photoUrl);
   renderResultEntries(result.entries || []);
-  renderClarify(result);
+  renderClarify(result, !!photoUrl);
   // Follow-ups refine THIS capture ("say more" after a photo, photo after voice).
   $('result-followup').classList.toggle('hidden', !result.capture_id);
   $('result-card').classList.remove('hidden');
@@ -422,18 +422,30 @@ $('followup-photo').addEventListener('click', () => {
 // Offer help only when the server's deterministic score says this capture is
 // shaky — nothing logged, the model asked a question, or the calories rest on
 // guessed portions. Never on a clean log, or the strip becomes wallpaper.
-function renderClarify(result) {
+function renderClarify(result, isPhoto = false) {
   const c = result.confidence || {};
   const el = $('result-clarify');
-  const show = !!c.clarify && !!result.capture_id;
+  const failed = c.reason === 'nothing-logged' || c.reason === 'model-asked-a-question';
+  // A photo can't show oil, butter or dressing, so always offer the reminder —
+  // as a one-line tip, not a prompt that interrupts the capture.
+  const show = !!result.capture_id && (c.clarify || isPhoto);
   el.classList.toggle('hidden', !show);
   if (!show) return;
-  const nothing = c.reason === 'nothing-logged' || c.reason === 'model-asked-a-question';
-  $('clarify-msg').textContent = nothing
-    ? "I couldn't log that confidently. Tell me a bit more — say it or type it."
-    : 'These portions are guesses. Say more or type a detail and I\'ll fix them.';
+  $('clarify-msg').textContent = failed
+    ? "I couldn't log that confidently — tap Say more and tell me a bit more."
+    : c.clarify
+      ? "These portions are guesses. Tap Say more and I'll fix them."
+      : "Tip: anything hidden in there — oils, butter, dressing? Tap Say more and I'll update it.";
+  $('clarify-form').classList.add('hidden');
+  $('clarify-type-link').classList.remove('hidden');
   $('clarify-text').value = '';
 }
+
+$('clarify-type-link').addEventListener('click', () => {
+  $('clarify-form').classList.remove('hidden');
+  $('clarify-type-link').classList.add('hidden');
+  $('clarify-text').focus();
+});
 
 $('clarify-form').addEventListener('submit', async e => {
   e.preventDefault();
@@ -484,7 +496,9 @@ function renderResultEntries(entries) {
     return;
   }
   wrap.innerHTML = entries.map(e => {
-    const equiv = servingEquiv(e.quantity_g, e.serving_g, e.serving_desc);
+    // portion_label covers foods with no serving size ("2 large" for two eggs);
+    // servingEquiv handles the rest ("≈ 5 cakes").
+    const equiv = e.portion_label || servingEquiv(e.quantity_g, e.serving_g, e.serving_desc);
     // Portion-ladder confidence: flag guessed portions so Adjust gets aimed
     // at the entries that actually need it.
     const pflag = e.portion_basis === 'history'
@@ -733,7 +747,7 @@ function servingEquiv(qtyG, servingG, desc) {
 }
 
 function entryHtml(e) {
-  const equiv = servingEquiv(e.quantity_g, e.serving_g, e.serving_desc);
+  const equiv = e.portion_label || servingEquiv(e.quantity_g, e.serving_g, e.serving_desc);
   return `<div class="log-entry" data-id="${e.id}" data-food="${e.food_id}" data-qty="${e.quantity_g}">
     <span class="log-source-icon">${sourceIcon(e.source)}</span>
     <div class="log-info">

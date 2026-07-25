@@ -388,8 +388,11 @@ async def _tool_log_food(user_id: int, inp: dict, method: str, note: str | None,
     # the evidence it had (it claimed 'label' on voice-only restaurant orders, and
     # 'count' on portions it invented). Downgrades never change the grams.
     inp = verify_claims(inp, method, note)
-    # A household observation may need the food's USDA portion weights — fetch once.
-    if _num(inp.get("household_qty")) > 0 and food.get("portions") is None:
+    # Household measures need the food's USDA portion weights; so do counts when
+    # the food has no serving size of its own ("two eggs" -> 2 x "1 large").
+    needs_portions = (_num(inp.get("household_qty")) > 0
+                      or (_num(inp.get("servings")) > 0 and not food.get("serving_g")))
+    if needs_portions and food.get("portions") is None:
         food = await ensure_portions(food)
     # The ladder does the mass math from the model's observation (hard rule: the
     # model reports, deterministic code converts); the guard clamps implausibles.
@@ -411,7 +414,9 @@ async def _tool_log_food(user_id: int, inp: dict, method: str, note: str | None,
     quantity_g, guard_note = guard_grams(food, res["grams"])
     guard_note = guard_note or snap_note
     try:
-        entry = log_entry_for_user(user_id, food_id, round(quantity_g, 1), method, notes=note)
+        entry = log_entry_for_user(user_id, food_id, round(quantity_g, 1), method, notes=note,
+                                   portion_basis=res["basis"],
+                                   portion_confidence=res["confidence"])
     except FoodNotFound:
         return {"error": f"food_id {food_id} not found"}
     # Ride along into the response + capture_log so the UI can show WHY a portion

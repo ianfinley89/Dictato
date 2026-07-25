@@ -19,6 +19,7 @@ Ladder (first rung that resolves wins; confidence reflects the rung):
 A deterministic guard then clamps physically implausible masses — the sibling of
 nutrition_guard: no model output becomes a log row without passing through here.
 """
+import json
 import re
 
 # Weight units convert to grams with no food data at all.
@@ -142,6 +143,97 @@ def parse_usda_portions(detail: dict) -> list[dict]:
     return out
 
 
+# Volume and weight measures. You can eat "1 large" egg, but "one cup" is not a
+# countable item — counting eggs off a cup weight gives 2 x 220 g instead of
+# 2 x 61 g.
+_MEASURE_UNITS = {
+    "cup", "cups", "tbsp", "tsp", "tablespoon", "teaspoon", "fl oz", "floz",
+    "fluid ounce", "oz", "ounce", "g", "gram", "kg", "ml", "l", "liter", "litre",
+    "lb", "pound", "pint", "quart", "gallon", "cubic inch", "serving",
+}
+
+
+def primary_unit_grams(food: dict) -> float | None:
+    """Weight of ONE of this food — "1 large" egg = 61 g — for the many generic
+    USDA rows that carry no serving size. Without it "two eggs" cannot resolve as
+    a count at all and collapses into a bare gram guess.
+
+    Only COUNTABLE units qualify. If the food is only described in cups and
+    spoons then "one" of it has no meaning, and returning None correctly sends
+    the portion down to a flagged estimate instead of inventing a unit."""
+    best = None
+    for p in food.get("portions") or []:
+        desc, unit = p.get("desc") or "", (p.get("unit") or "").strip().lower()
+        if not p.get("grams") or not p.get("qty"):
+            continue
+        if _BULK_DESC_RE.search(desc) or _BULK_DESC_RE.search(unit):
+            continue                    # a pot of coffee is not one coffee
+        if unit in _MEASURE_UNITS:
+            continue                    # a cup of egg is not an egg
+        per = p["grams"] / p["qty"]
+        if per <= 0 or per > _MAX_OPTION_G:
+            continue
+        if best is None or per > best:
+            best = per
+    return best
+
+
+_PLURALISABLE = {
+    "cup", "slice", "spear", "piece", "can", "bottle", "container", "egg",
+    "tablespoon", "teaspoon", "tbsp", "tsp", "link", "patty", "cake", "cookie",
+    "stick", "wedge", "fillet", "scoop", "bar", "muffin", "roll", "taco",
+}
+
+
+def _fmt_count(n: float) -> str:
+    whole, frac = int(n), round(n - int(n), 2)
+    sym = {0.25: "¼", 0.5: "½", 0.75: "¾"}.get(frac)
+    if sym:
+        return f"{whole}{sym}" if whole else sym
+    return f"{n:g}"
+
+
+def portion_label(quantity_g: float, serving_g=None, serving_desc=None,
+                  portions_json=None) -> str | None:
+    """Household phrasing for foods with NO serving size — "2 large", "1½ cups".
+    Returns None when serving_g exists, because the client already renders that
+    ("≈ 5 cakes"). This is what stops a two-egg omelette reading as bare grams."""
+    if serving_g or not portions_json or not quantity_g:
+        return None
+    try:
+        portions = (json.loads(portions_json) if isinstance(portions_json, str)
+                    else portions_json) or []
+    except (ValueError, TypeError):
+        return None
+
+    best = None
+    for p in portions:
+        desc, unit = p.get("desc") or "", p.get("unit") or ""
+        if not p.get("grams") or not p.get("qty") or _BULK_DESC_RE.search(desc) \
+                or _BULK_DESC_RE.search(unit):
+            continue
+        per = p["grams"] / p["qty"]
+        if per <= 0:
+            continue
+        count = quantity_g / per
+        if not (0.25 <= count <= 12):
+            continue
+        # Prefer a count that lands on a natural fraction ("2 large", not
+        # "1.64 large"), then the biggest unit, so eggs beat tablespoons.
+        rounded = round(count * 4) / 4
+        cleanliness = abs(count - rounded) / max(count, 0.01)
+        cand = (cleanliness <= 0.06, per, rounded, unit)
+        if best is None or (cand[0], cand[1]) > (best[0], best[1]):
+            best = cand
+    if not best or not best[0]:
+        return None
+    _, _, rounded, unit = best
+    # Only pluralise words that take an "s" — USDA units include bare adjectives
+    # ("1 large" for an egg), and "2 larges" reads like a typo.
+    plural = "s" if (rounded > 1 and unit in _PLURALISABLE and not unit.endswith("s")) else ""
+    return f"{_fmt_count(rounded)} {unit}{plural}"
+
+
 def match_household(portions: list[dict] | None, qty: float, unit: str) -> float | None:
     """qty x the food's gram weight for a matching household unit, else None."""
     u = _norm_unit(unit)
@@ -171,16 +263,20 @@ def resolve_grams(food: dict, inp: dict) -> dict:
     if basis in ("stated", "label") and qty_g > 0:
         return {"grams": qty_g, "basis": basis, "confidence": "high", "note": None}
 
-    # Rung 2: count x the food's known serving weight. The MATH is trusted either
-    # way; the CONFIDENCE depends on whether the user really counted (an
-    # unverified count measured no better than a blind guess — 32.7% vs 34.1%
-    # median error over 123 Menu-Match items).
-    if servings > 0 and food.get("serving_g"):
-        verified = bool(inp.get("count_verified"))
-        return {"grams": servings * food["serving_g"], "basis": "count",
-                "confidence": "high" if verified else "low",
-                "note": f"{servings:g} x {food['serving_g']:g}g serving"
-                        + ("" if verified else " (count inferred, not stated)")}
+    # Rung 2: count x the weight of one unit. Prefer the food's own serving size;
+    # failing that (most generic USDA rows have none) use one natural household
+    # unit, so "two eggs" resolves as 2 x 61 g instead of collapsing to a guess.
+    # The MATH is trusted either way; the CONFIDENCE depends on whether the user
+    # really counted — an unverified count measured no better than a blind guess
+    # (32.7% vs 34.1% median error over 123 Menu-Match items).
+    if servings > 0:
+        per_unit = food.get("serving_g") or primary_unit_grams(food)
+        if per_unit:
+            verified = bool(inp.get("count_verified"))
+            return {"grams": servings * per_unit, "basis": "count",
+                    "confidence": "high" if verified else "low",
+                    "note": f"{servings:g} x {per_unit:g}g"
+                            + ("" if verified else " (count inferred, not stated)")}
 
     # Rung 3: household measure.
     if h_qty > 0 and h_unit:

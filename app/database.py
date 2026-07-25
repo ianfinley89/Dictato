@@ -47,6 +47,10 @@ CREATE TABLE IF NOT EXISTS log_entries (
     photo_path TEXT,
     confirmed INTEGER NOT NULL DEFAULT 1,
     notes TEXT,
+    -- Which rung of the portion ladder produced quantity_g, and how much it is
+    -- trusted. Stored so a follow-up (which re-reads entries) keeps the history.
+    portion_basis TEXT,
+    portion_confidence TEXT,
     -- 1 when the user set this quantity themselves (portion picker / adjust).
     -- Separate from `source` so the capture method survives a correction.
     portion_manual INTEGER NOT NULL DEFAULT 0,
@@ -276,6 +280,12 @@ def _migrate(conn) -> None:
     _repair_nutrients(conn)
 
     log_cols = {r["name"] for r in conn.execute("PRAGMA table_info(log_entries)")}
+    for col in ("portion_basis", "portion_confidence"):
+        if col not in log_cols:
+            # Stored on the ENTRY, not just echoed in the capture response: a
+            # follow-up re-reads entries from the DB, so without these columns
+            # every corrected capture silently lost its ladder telemetry.
+            conn.execute(f"ALTER TABLE log_entries ADD COLUMN {col} TEXT")
     if "portion_manual" not in log_cols:
         # The user set this quantity by hand (portion picker / adjust). Kept
         # separate from `source` so the capture method (voice/photo) is not lost,

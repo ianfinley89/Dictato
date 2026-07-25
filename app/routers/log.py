@@ -8,7 +8,7 @@ from app.database import get_conn
 from app.services.logging import (log_entry_for_user, source_label, FoodNotFound,
                                   update_entry_quantity)
 from app.services.food_lookup import get_food_by_id, ensure_portions
-from app.services.portion import build_options, guard_grams
+from app.services.portion import build_options, guard_grams, portion_label
 from app.services.portion_history import personal_prior
 
 router = APIRouter(prefix="/api/log", tags=["log"])
@@ -39,7 +39,7 @@ async def get_today(request: Request, tz_offset: int = 0, date: str | None = Non
     with get_conn() as conn:
         rows = conn.execute(
             """SELECT le.*, f.name AS food_name, f.brand AS food_brand, f.source AS food_source,
-                      f.serving_g, f.serving_desc
+                      f.serving_g, f.serving_desc, f.portions_json
                FROM log_entries le JOIN foods f ON f.id = le.food_id
                WHERE le.user_id=? AND DATE(le.eaten_at, ?) = ?
                ORDER BY le.eaten_at""",
@@ -79,7 +79,7 @@ async def get_range(request: Request, start: str, end: str):
     with get_conn() as conn:
         rows = conn.execute(
             """SELECT le.*, f.name AS food_name, f.brand AS food_brand, f.source AS food_source,
-                      f.serving_g, f.serving_desc
+                      f.serving_g, f.serving_desc, f.portions_json
                FROM log_entries le JOIN foods f ON f.id = le.food_id
                WHERE le.user_id=? AND DATE(le.eaten_at) BETWEEN ? AND ?
                ORDER BY le.eaten_at""",
@@ -216,6 +216,14 @@ def _format_entry(row, conn=None) -> dict:
     if "serving_g" in row.keys():
         entry["serving_g"] = row["serving_g"]
         entry["serving_desc"] = row["serving_desc"]
+        # Foods with no serving size still have USDA measures — "2 large" beats
+        # bare grams for a two-egg omelette.
+        if "portions_json" in row.keys():
+            entry["portion_label"] = portion_label(row["quantity_g"], row["serving_g"],
+                                                   row["serving_desc"], row["portions_json"])
+    for col in ("portion_basis", "portion_confidence"):
+        if col in row.keys():
+            entry[col] = row[col]
     if conn is not None and "food_source" in row.keys():
         entry["food_source"] = source_label(conn, row["food_id"], row["food_source"])
     return entry

@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 
 from app.database import get_conn
 from app.services.food_lookup import get_food_by_id
+from app.services.portion import portion_label
 
 
 class FoodNotFound(Exception):
@@ -49,6 +50,8 @@ def log_entry_for_user(
     source: str,
     notes: str | None = None,
     eaten_at: str | None = None,
+    portion_basis: str | None = None,
+    portion_confidence: str | None = None,
 ) -> dict:
     """Insert a log entry and return it in the shape the frontend renders
     (same fields as _format_entry in the log router, minus eaten_at math)."""
@@ -72,9 +75,11 @@ def log_entry_for_user(
     with get_conn() as conn:
         cur = conn.execute(
             """INSERT INTO log_entries
-               (user_id, food_id, eaten_at, quantity_g, nutrients_snapshot_json, source, notes, confirmed)
-               VALUES (?,?,?,?,?,?,?,1)""",
-            (user_id, food_id, eaten_at, quantity_g, json.dumps(snapshot), source, notes),
+               (user_id, food_id, eaten_at, quantity_g, nutrients_snapshot_json, source,
+                notes, confirmed, portion_basis, portion_confidence)
+               VALUES (?,?,?,?,?,?,?,1,?,?)""",
+            (user_id, food_id, eaten_at, quantity_g, json.dumps(snapshot), source, notes,
+             portion_basis, portion_confidence),
         )
         entry_id = cur.lastrowid
         label = source_label(conn, food_id, food["source"])
@@ -92,6 +97,8 @@ def log_entry_for_user(
         "food_source_raw": food["source"],
         "serving_g": food.get("serving_g"),
         "serving_desc": food.get("serving_desc"),
+        "portion_basis": portion_basis,
+        "portion_confidence": portion_confidence,
         **snapshot,
     }
 
@@ -158,7 +165,7 @@ def current_entries(user_id: int, entry_ids: list[int]) -> list[dict]:
     with get_conn() as conn:
         rows = conn.execute(
             f"""SELECT le.*, f.name AS food_name, f.brand AS food_brand, f.source AS food_source_raw,
-                       f.serving_g, f.serving_desc
+                       f.serving_g, f.serving_desc, f.portions_json
                 FROM log_entries le JOIN foods f ON f.id = le.food_id
                 WHERE le.user_id=? AND le.id IN ({marks}) ORDER BY le.id""",
             (user_id, *entry_ids),
@@ -172,6 +179,11 @@ def current_entries(user_id: int, entry_ids: list[int]) -> list[dict]:
                 "quantity_g": r["quantity_g"], "source": r["source"], "notes": r["notes"],
                 "food_source": source_label(conn, r["food_id"], r["food_source_raw"]),
                 "food_source_raw": r["food_source_raw"],
-                "serving_g": r["serving_g"], "serving_desc": r["serving_desc"], **snap,
+                "serving_g": r["serving_g"], "serving_desc": r["serving_desc"],
+                "portion_basis": r["portion_basis"],
+                "portion_confidence": r["portion_confidence"],
+                "portion_label": portion_label(r["quantity_g"], r["serving_g"],
+                                               r["serving_desc"], r["portions_json"]),
+                **snap,
             })
     return out

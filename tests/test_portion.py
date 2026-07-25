@@ -1,8 +1,21 @@
 """Portion ladder: the model reports observations, this math must be exact."""
+import json
+
+import pytest
+
 from app.services.portion import (
     parse_usda_portions, match_household, resolve_grams, guard_grams,
-    snap_estimate, stated_number, verify_claims,
+    snap_estimate, stated_number, verify_claims, portion_label,
+    primary_unit_grams,
 )
+
+# "Egg, Whole, Cooked, Scrambled" as USDA actually returns it — no serving size,
+# which is why a two-egg omelette used to land as bare grams.
+EGG_PORTIONS = [
+    {"unit": "tbsp", "qty": 1, "grams": 13.7, "desc": "1 tbsp"},
+    {"unit": "large", "qty": 1, "grams": 61.0, "desc": "1 large"},
+    {"unit": "cup", "qty": 1, "grams": 220.0, "desc": "1 cup"},
+]
 
 RICE = {"id": 1, "name": "Rice, white, cooked", "serving_g": None,
         "portions": [{"unit": "cup", "qty": 1, "grams": 158.0, "desc": "1 cup"}]}
@@ -42,6 +55,67 @@ def test_unverified_count_keeps_math_but_loses_confidence():
 def test_count_without_serving_g_falls_to_estimate():
     r = resolve_grams(PLAIN, {"quantity_g": 120, "basis": "count", "servings": 2})
     assert (r["grams"], r["basis"], r["confidence"]) == (120, "estimate", "low")
+
+
+def test_two_eggs_resolve_via_usda_units_not_a_guess():
+    """The omelette case: the food has no serving_g, so "two eggs" used to
+    collapse into a bare gram guess. One natural unit ("1 large" = 61g) resolves
+    it properly."""
+    egg = {"portions": EGG_PORTIONS, "serving_g": None}
+    r = resolve_grams(egg, {"quantity_g": 100, "basis": "count", "servings": 2,
+                            "count_verified": True})
+    assert r["grams"] == pytest.approx(122.0)     # 2 x 61g, not the model's 100
+    assert r["basis"] == "count" and r["confidence"] == "high"
+
+
+def test_primary_unit_is_countable_not_the_biggest_measure():
+    """"One" egg is "1 large" (61g), never "1 cup" (220g)."""
+    assert primary_unit_grams({"portions": EGG_PORTIONS}) == pytest.approx(61.0)
+    pot = {"portions": [{"unit": "medium", "qty": 1, "grams": 480.0, "desc": "1 medium"},
+                        {"unit": "pot", "qty": 1, "grams": 1800.0,
+                         "desc": "1 large pot (60 FO, 12 servings)"}]}
+    assert primary_unit_grams(pot) == pytest.approx(480.0)
+    assert primary_unit_grams({}) is None
+
+
+def test_no_countable_unit_means_no_invented_count():
+    """A food known only in cups and spoons has no "one of it" — better a flagged
+    estimate than pretending a cup is an item."""
+    spoons = {"portions": [{"unit": "cup", "qty": 1, "grams": 240.0, "desc": "1 cup"},
+                           {"unit": "tbsp", "qty": 1, "grams": 15.0, "desc": "1 tbsp"}]}
+    assert primary_unit_grams(spoons) is None
+    r = resolve_grams({"serving_g": None, **spoons},
+                      {"quantity_g": 200, "basis": "count", "servings": 2})
+    assert r["basis"] == "estimate"
+
+
+# ── Household phrasing for foods with no serving size ────────────────────────
+def test_two_eggs_read_as_eggs_not_grams():
+    """A bare USDA adjective must not be pluralised into "2 larges"."""
+    assert portion_label(122.0, None, None, json.dumps(EGG_PORTIONS)) == "2 large"
+
+
+def test_label_prefers_a_clean_count_over_a_bigger_unit():
+    """122g is exactly 2 "large" but an awkward 0.55 of a "cup"."""
+    label = portion_label(122.0, None, None, json.dumps(EGG_PORTIONS))
+    assert "large" in label and label.startswith("2")
+
+
+def test_label_renders_fractions():
+    cups = [{"unit": "cup", "qty": 1, "grams": 200.0, "desc": "1 cup"}]
+    assert portion_label(100.0, None, None, json.dumps(cups)) == "½ cup"
+    assert portion_label(300.0, None, None, json.dumps(cups)) == "1½ cups"
+
+
+def test_label_defers_when_serving_size_exists():
+    """The client already renders "≈ 5 cakes" from serving_g; don't double up."""
+    assert portion_label(45.0, 9.0, "1 cake", json.dumps(EGG_PORTIONS)) is None
+
+
+def test_label_is_silent_when_nothing_fits():
+    assert portion_label(5000.0, None, None, json.dumps(EGG_PORTIONS)) is None
+    assert portion_label(100.0, None, None, None) is None
+    assert portion_label(100.0, None, None, "not json") is None
 
 
 # ── Rung 3: household measures ───────────────────────────────────────────────
