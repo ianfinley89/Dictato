@@ -57,19 +57,42 @@ app.include_router(reminders.router)
 app.include_router(recipes.router)
 
 
+# The app shell must never be served from a browser's heuristic cache: with only
+# an ETag and no Cache-Control, browsers may reuse old JS for hours WITHOUT
+# revalidating, so a shipped fix quietly fails to reach anyone. "no-cache" still
+# allows a cheap 304 — it just forces the check.
+_NO_CACHE = {"Cache-Control": "no-cache, must-revalidate"}
+
+
+class _RevalidatingStatic(StaticFiles):
+    """StaticFiles that always revalidates code/markup (cheap 304s), while
+    letting genuinely immutable assets (icons) stay cached for a day."""
+
+    def file_response(self, *args, **kwargs):
+        resp = super().file_response(*args, **kwargs)
+        path = str(getattr(resp, "path", ""))
+        if path.endswith((".js", ".css", ".html", ".json")):
+            resp.headers.update(_NO_CACHE)
+        else:
+            resp.headers.setdefault("Cache-Control", "public, max-age=86400")
+        return resp
+
+
 @app.get("/sw.js")
 async def service_worker():
-    return FileResponse("static/sw.js", media_type="application/javascript")
+    return FileResponse("static/sw.js", media_type="application/javascript",
+                        headers=_NO_CACHE)
 
 
 @app.get("/manifest.json")
 async def manifest():
-    return FileResponse("static/manifest.json", media_type="application/manifest+json")
+    return FileResponse("static/manifest.json",
+                        media_type="application/manifest+json", headers=_NO_CACHE)
 
 
-app.mount("/static", StaticFiles(directory="static"), name="static")
+app.mount("/static", _RevalidatingStatic(directory="static"), name="static")
 
 
 @app.get("/{full_path:path}")
 async def serve_spa(full_path: str):
-    return FileResponse("static/index.html")
+    return FileResponse("static/index.html", headers=_NO_CACHE)
