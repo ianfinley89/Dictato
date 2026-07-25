@@ -22,7 +22,8 @@ from app.services.logging import (log_entry_for_user, update_entry_quantity,
                                   remove_entry, FoodNotFound)
 from app.services.nutrition_guard import sanitize_per_100g
 from app.services.portion import (resolve_grams, guard_grams, snap_estimate,
-                                  verify_claims)
+                                  verify_claims, apply_personal_prior)
+from app.services.portion_history import personal_prior
 from app.services.profile import apply_profile_update
 from app.services.voice_parse import parse_local
 
@@ -349,9 +350,13 @@ async def _tool_log_food(user_id: int, inp: dict, method: str, note: str | None,
     if res["grams"] <= 0:
         return {"error": "provide quantity_g (your best-guess grams) — plus servings "
                          "or household_qty/household_unit when you observed one"}
-    # Blind estimates get snapped against the food's own household portion
-    # weights (down-only) — the Menu-Match side-overshoot fix.
+    # A blind guess is the LAST thing we want to log. First try what this user
+    # actually eats (their own kept/corrected history), then fall back to
+    # snapping the guess against the food's own portion anchor.
     snap_note = None
+    raw_grams = res["grams"]
+    if res["basis"] == "estimate":
+        res = apply_personal_prior(res, personal_prior(user_id, food_id))
     if res["basis"] == "estimate":
         if food.get("portions") is None:
             food = await ensure_portions(food)
@@ -367,6 +372,10 @@ async def _tool_log_food(user_id: int, inp: dict, method: str, note: str | None,
     entry["portion_basis"] = res["basis"]
     entry["portion_confidence"] = res["confidence"]
     entry["portion_snapped"] = bool(snap_note)
+    # What the model alone would have logged — lets us measure later how far the
+    # prior/snap moved things, and A/B undo rates by basis on real usage.
+    if round(raw_grams, 1) != round(quantity_g, 1):
+        entry["portion_model_g"] = round(raw_grams, 1)
     logged.append(entry)
     out = {"logged": True, "entry_id": entry["id"], "name": entry["food_name"],
            "quantity_g": entry["quantity_g"], "calories": entry["calories"],

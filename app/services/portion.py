@@ -203,6 +203,21 @@ def resolve_grams(food: dict, inp: dict) -> dict:
     return {"grams": 0.0, "basis": "none", "confidence": "low", "note": None}
 
 
+def apply_personal_prior(res: dict, prior: dict | None) -> dict:
+    """Rung 3.5: replace a BLIND guess with what this user actually eats.
+
+    Only ever displaces basis 'estimate' — a stated weight, a real count or a
+    household measure is evidence about THIS meal and always outranks a habit.
+    The prior itself is gated in portion_history.personal_prior (enough kept
+    logs, low variance), so reaching here means the food is genuinely habitual."""
+    if not prior or res.get("basis") != "estimate" or not prior.get("grams"):
+        return res
+    return {"grams": float(prior["grams"]), "basis": "history",
+            "confidence": "medium",
+            "note": f"your usual portion for this food "
+                    f"({prior['n']} {prior['kind']} log{'s' if prior['n'] != 1 else ''})"}
+
+
 _SNAP_MULT = 2.0
 
 

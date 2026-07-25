@@ -445,7 +445,9 @@ function renderResultEntries(entries) {
     const equiv = servingEquiv(e.quantity_g, e.serving_g, e.serving_desc);
     // Portion-ladder confidence: flag guessed portions so Adjust gets aimed
     // at the entries that actually need it.
-    const pflag = e.portion_confidence === 'low' ? ` · <span class="portion-flag">~portion guessed</span>` : '';
+    const pflag = e.portion_basis === 'history'
+      ? ` · <span class="portion-flag">your usual portion</span>`
+      : (e.portion_confidence === 'low' ? ` · <span class="portion-flag">~portion guessed</span>` : '');
     return `
     <div class="result-entry" data-id="${e.id}">
       <div class="result-entry-info">

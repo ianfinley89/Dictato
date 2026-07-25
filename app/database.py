@@ -215,6 +215,9 @@ CREATE TABLE IF NOT EXISTS app_errors (
 );
 
 CREATE INDEX IF NOT EXISTS idx_log_user_eaten ON log_entries(user_id, eaten_at);
+-- Personal portion priors look up one user's history for one food on every
+-- estimate-basis log.
+CREATE INDEX IF NOT EXISTS idx_log_user_food ON log_entries(user_id, food_id);
 CREATE INDEX IF NOT EXISTS idx_foods_name ON foods(name);
 CREATE INDEX IF NOT EXISTS idx_capture_user_created ON capture_log(user_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_coach_user_created ON coach_messages(user_id, created_at);
