@@ -3,9 +3,13 @@ import re
 from datetime import datetime, timezone, timedelta
 from fastapi import APIRouter, Request, HTTPException, Query
 from app.auth import get_current_user_id
-from app.models import LogEntryCreate, WaterUpdate
+from app.models import LogEntryCreate, WaterUpdate, PortionUpdate
 from app.database import get_conn
-from app.services.logging import log_entry_for_user, source_label, FoodNotFound
+from app.services.logging import (log_entry_for_user, source_label, FoodNotFound,
+                                  update_entry_quantity)
+from app.services.food_lookup import get_food_by_id, ensure_portions
+from app.services.portion import build_options, guard_grams
+from app.services.portion_history import personal_prior
 
 router = APIRouter(prefix="/api/log", tags=["log"])
 
@@ -131,6 +135,51 @@ async def create_entry(request: Request, body: LogEntryCreate):
     except FoodNotFound:
         raise HTTPException(404, "Food not found")
     return entry
+
+
+def _owned_entry(uid: int, entry_id: int):
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT id, user_id, food_id, quantity_g FROM log_entries WHERE id=?",
+            (entry_id,)).fetchone()
+    if not row:
+        raise HTTPException(404, "Entry not found")
+    if row["user_id"] != uid:
+        raise HTTPException(403, "Forbidden")
+    return row
+
+
+@router.get("/{entry_id}/portions")
+async def entry_portion_options(entry_id: int, request: Request):
+    """Portion choices for one entry — "1 spear (30g)", "1 can or bottle (12 fl
+    oz)", "your usual". Every gram figure comes from USDA, the food's own serving
+    size, or this user's history, so picking one is grounded rather than guessed.
+
+    USDA household weights are fetched here on first need (not while logging, so
+    the capture stays fast) and cached on the food forever."""
+    uid = get_current_user_id(request)
+    row = _owned_entry(uid, entry_id)
+    food = get_food_by_id(row["food_id"])
+    if not food:
+        raise HTTPException(404, "Food not found")
+    food = await ensure_portions(food)
+    return {"entry_id": entry_id, "quantity_g": row["quantity_g"],
+            "options": build_options(food, row["quantity_g"], personal_prior(uid, row["food_id"]))}
+
+
+@router.put("/{entry_id}/portion")
+async def set_entry_portion(entry_id: int, request: Request, body: PortionUpdate):
+    """Apply a portion the USER chose. Recorded as manual so it also becomes the
+    anchor for future logs of this food (correct it once, we stop guessing)."""
+    uid = get_current_user_id(request)
+    row = _owned_entry(uid, entry_id)
+    grams, note = guard_grams(get_food_by_id(row["food_id"]) or {}, body.quantity_g)
+    try:
+        entry = update_entry_quantity(uid, entry_id, round(grams, 1), manual=True)
+    except FoodNotFound:
+        raise HTTPException(404, "Entry not found")
+    return {**entry, "portion_basis": body.basis or "manual",
+            "portion_confidence": "high", "note": note}
 
 
 @router.delete("/{entry_id}")

@@ -47,6 +47,9 @@ CREATE TABLE IF NOT EXISTS log_entries (
     photo_path TEXT,
     confirmed INTEGER NOT NULL DEFAULT 1,
     notes TEXT,
+    -- 1 when the user set this quantity themselves (portion picker / adjust).
+    -- Separate from `source` so the capture method survives a correction.
+    portion_manual INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -271,6 +274,13 @@ def _migrate(conn) -> None:
         conn.execute("ALTER TABLE foods ADD COLUMN portions_json TEXT")
     _backfill_serving_g(conn)
     _repair_nutrients(conn)
+
+    log_cols = {r["name"] for r in conn.execute("PRAGMA table_info(log_entries)")}
+    if "portion_manual" not in log_cols:
+        # The user set this quantity by hand (portion picker / adjust). Kept
+        # separate from `source` so the capture method (voice/photo) is not lost,
+        # while personal portion priors can still treat it as verified.
+        conn.execute("ALTER TABLE log_entries ADD COLUMN portion_manual INTEGER NOT NULL DEFAULT 0")
 
     rem_cols = {r["name"] for r in conn.execute("PRAGMA table_info(reminders)")}
     if "tz_offset" not in rem_cols:

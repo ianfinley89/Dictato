@@ -48,7 +48,7 @@ def personal_prior(uid: int, food_id: int) -> dict | None:
     too thin or too variable to be worth trusting."""
     with get_conn() as conn:
         rows = conn.execute(
-            """SELECT quantity_g, source FROM log_entries
+            """SELECT quantity_g, source, portion_manual FROM log_entries
                WHERE user_id=? AND food_id=? AND quantity_g > 0
                ORDER BY eaten_at DESC, id DESC LIMIT ?""",
             (uid, food_id, _LOOKBACK),
@@ -56,7 +56,10 @@ def personal_prior(uid: int, food_id: int) -> dict | None:
     if not rows:
         return None
 
-    verified = [r["quantity_g"] for r in rows if r["source"] == "manual"]
+    # "Verified" = the user set this number themselves: a manual entry, or a
+    # portion they picked/adjusted on a voice or photo log.
+    verified = [r["quantity_g"] for r in rows
+                if r["source"] == "manual" or r["portion_manual"]]
     habitual = [r["quantity_g"] for r in rows]
     # Hand-corrected portions win: the user told us this number directly.
     for pool, kind, min_n in ((verified, "verified", _MIN_N_VERIFIED),

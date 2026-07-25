@@ -34,6 +34,11 @@ class GoalsUpdate(BaseModel):
     fat_g: Optional[float] = None
 
 
+class PortionUpdate(BaseModel):
+    quantity_g: float
+    basis: Optional[str] = None     # which option the user picked, for telemetry
+
+
 class WeightIn(BaseModel):
     value: float           # in `unit`; stored canonically as kg
     unit: Optional[str] = "lb"

@@ -1026,6 +1026,7 @@ button:focus-visible, input:focus-visible, .chip:focus-visible {
 .result-entry {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;      /* lets the portion picker drop onto its own row */
   gap: 10px;
   border: 1px solid var(--border);
   border-radius: 12px;
@@ -1083,6 +1084,29 @@ button:focus-visible, input:focus-visible, .chip:focus-visible {
   color: var(--text-muted);
   font-style: italic;
 }
+
+.portion-picker {
+  flex-basis: 100%;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.portion-opt {
+  background: rgba(255,255,255,0.06);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 999px;
+  padding: 7px 12px;
+  font-size: 0.82rem;
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
+}
+
+.portion-opt:hover { border-color: var(--accent); background: rgba(139,124,255,0.14); }
+.portion-opt:active { transform: scale(0.97); }
+.portion-opt.current { border-color: var(--accent); background: rgba(139,124,255,0.18); }
 
 .weight-unit {
   background: rgba(0,0,0,0.28);

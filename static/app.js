@@ -454,10 +454,18 @@ function renderResultEntries(entries) {
         <div class="result-entry-name">${esc(e.food_name)}${e.food_brand ? ' · ' + esc(e.food_brand) : ''}</div>
         <div class="result-entry-meta">${Math.round(e.quantity_g)}g${equiv ? ` (${esc(equiv)})` : ''} · ${e.calories.toFixed(0)} cal · ${icon('db')} ${esc(e.food_source || '')}${pflag}</div>
       </div>
+      <button class="result-portion link-btn" data-id="${e.id}">Portion</button>
       <button class="result-adjust link-btn" data-id="${e.id}" data-food="${e.food_id}" data-qty="${e.quantity_g}">Adjust</button>
       <button class="result-undo link-btn" data-id="${e.id}">Undo</button>
+      <div class="portion-picker hidden" data-for="${e.id}"></div>
     </div>`;
   }).join('');
+
+  wrap.querySelectorAll('.result-portion').forEach(btn => {
+    btn.addEventListener('click', () => togglePortionPicker(btn.dataset.id));
+  });
+  // Warm the options while the user reads the card, so the tap is instant.
+  entries.forEach(e => portionOptions(e.id));
 
   wrap.querySelectorAll('.result-undo').forEach(btn => {
     btn.addEventListener('click', async () => {
@@ -473,6 +481,59 @@ function renderResultEntries(entries) {
     btn.addEventListener('click', () =>
       adjustEntry(btn.dataset.id, btn.dataset.food, btn.dataset.qty));
   });
+}
+
+// ── Portion picker: fix a portion by tapping a real measure, not arguing grams ─
+const _portionCache = new Map();
+
+function portionOptions(entryId) {
+  if (!_portionCache.has(entryId)) {
+    _portionCache.set(entryId, api.get(`/api/log/${entryId}/portions`).catch(() => null));
+  }
+  return _portionCache.get(entryId);
+}
+
+async function togglePortionPicker(entryId) {
+  const box = document.querySelector(`.portion-picker[data-for="${entryId}"]`);
+  if (!box) return;
+  if (!box.classList.contains('hidden')) { box.classList.add('hidden'); return; }
+  box.innerHTML = '<span class="portion-flag">loading…</span>';
+  box.classList.remove('hidden');
+  const data = await portionOptions(entryId);
+  const opts = (data && data.options) || [];
+  if (!opts.length) {
+    box.innerHTML = '<span class="portion-flag">No known measures for this food — use Adjust.</span>';
+    return;
+  }
+  box.innerHTML = opts.map(o => `
+    <button class="portion-opt${o.current ? ' current' : ''}" data-g="${o.grams}" data-basis="${esc(o.basis)}">
+      ${esc(o.label)} <span class="portion-flag">${Math.round(o.grams)}g</span>
+    </button>`).join('');
+
+  box.querySelectorAll('.portion-opt').forEach(b => {
+    b.addEventListener('click', async () => {
+      try {
+        await api.put(`/api/log/${entryId}/portion`,
+                      { quantity_g: parseFloat(b.dataset.g), basis: b.dataset.basis });
+        _portionCache.delete(entryId);
+        box.classList.add('hidden');
+        showToast('Portion updated — we\'ll remember it');
+        await goToToday();
+        if (_lastResult && _lastResult.capture_id) await refreshResultEntries();
+      } catch (err) { showToast(err.message, 'error'); }
+    });
+  });
+}
+
+// Re-read the entries of the capture on screen so the card matches the log.
+async function refreshResultEntries() {
+  const ids = (_lastResult.entries || []).map(e => e.id).filter(Boolean);
+  if (!ids.length) return;
+  const fresh = (state.dayLog || []).filter(e => ids.includes(e.id));
+  if (fresh.length) {
+    _lastResult.entries = fresh;
+    renderResultEntries(fresh);
+  }
 }
 
 $('result-close').addEventListener('click', () => $('result-card').classList.add('hidden'));

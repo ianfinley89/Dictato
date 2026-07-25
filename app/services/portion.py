@@ -203,6 +203,82 @@ def resolve_grams(food: dict, inp: dict) -> dict:
     return {"grams": 0.0, "basis": "none", "confidence": "low", "note": None}
 
 
+_MAX_OPTIONS = 7
+_MAX_OPTION_G = 1000.0      # a picker offers plausible single portions; Adjust
+                            # still allows anything up to the guard's ceiling
+
+# USDA mixes bulk containers and recipe yields in with real portions — "1 large
+# pot (60 FO, 12 servings)" is not a serving of coffee, and offering it invites a
+# catastrophic mistap. Note the plural "servings": "1 single serving container"
+# IS a portion and must survive.
+_BULK_DESC_RE = re.compile(
+    r"\bservings\b|\b\d+\s*servings?\b|\bpot\b|\bpackage\b|\bcarton\b|\brecipe\b"
+    r"|\byields?\b|\bbulk\b|\bcase\b", re.I)
+
+
+def build_options(food: dict, current_g: float, prior: dict | None = None) -> list[dict]:
+    """Human-meaningful portion choices for one logged entry, every gram figure
+    coming from USDA data, the food's own serving size, or the user's own
+    history — never from a model. This is what lets a wrong portion be fixed by
+    tapping "1 can or bottle (12 fl oz)" instead of arguing about grams.
+
+    Each option carries the ladder fields, so choosing one is recorded as the
+    evidence it actually is (household / count / history) rather than a guess."""
+    opts: list[dict] = []
+
+    def add(label: str, grams: float, basis: str, **extra) -> None:
+        grams = round(float(grams), 1)
+        if grams <= 0 or grams > _MAX_OPTION_G:
+            return
+        if any(abs(o["grams"] - grams) < 0.5 for o in opts):
+            return                      # same portion by another name
+        opts.append({"label": label, "grams": grams, "basis": basis, **extra})
+
+    # 1. Real USDA household measures — the best options, e.g. "1 spear" = 30 g.
+    primary = None
+    for p in (food.get("portions") or [])[:6]:
+        if p.get("grams") and p.get("qty"):
+            desc = p.get("desc") or f"{p['qty']:g} {p['unit']}"
+            if _BULK_DESC_RE.search(desc) or _BULK_DESC_RE.search(p.get("unit") or ""):
+                continue                # a pot of coffee is not a portion of coffee
+            add(desc, p["grams"], "household",
+                household_qty=p["qty"], household_unit=p["unit"])
+            # The heaviest SURVIVING measure is the one people plausibly eat a
+            # portion of ("1 can", not "1 fl oz"), so scale halves/doubles off it.
+            if p["grams"] <= _MAX_OPTION_G and (not primary or p["grams"] > primary["grams"]):
+                primary = p
+    if primary:
+        unit, qty, g = primary["unit"], primary["qty"], primary["grams"]
+        add(f"half a {unit}" if qty == 1 else f"half ({primary['desc']})", g * 0.5,
+            "household", household_qty=qty * 0.5, household_unit=unit)
+        add(f"2 {unit}s" if qty == 1 else f"2 x ({primary['desc']})", g * 2,
+            "household", household_qty=qty * 2, household_unit=unit)
+
+    # 2. The food's own serving, and the two multiples people actually eat.
+    sg = food.get("serving_g")
+    if sg:
+        one = (food.get("serving_desc") or "1 serving").strip()
+        add(one if one[0].isdigit() else f"1 {one}", sg, "count", servings=1)
+        add(f"half ({one})", sg * 0.5, "count", servings=0.5)
+        add(f"2 x {one}", sg * 2, "count", servings=2)
+
+    # 3. What this user normally has.
+    if prior and prior.get("grams"):
+        add("your usual", prior["grams"], "history")
+
+    # 4. Only when the food knows nothing about itself (no USDA measure, no
+    #    serving size — 60% of what users log) fall back to scaling the guess.
+    if not opts and current_g > 0:
+        add("half of this", current_g * 0.5, "estimate")
+        add("this amount", current_g, "estimate")
+        add("double this", current_g * 2, "estimate")
+
+    opts.sort(key=lambda o: o["grams"])
+    for o in opts:
+        o["current"] = abs(o["grams"] - round(current_g, 1)) < 0.5
+    return opts[:_MAX_OPTIONS]
+
+
 def apply_personal_prior(res: dict, prior: dict | None) -> dict:
     """Rung 3.5: replace a BLIND guess with what this user actually eats.
 

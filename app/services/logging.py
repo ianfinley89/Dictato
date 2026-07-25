@@ -107,9 +107,12 @@ def _snapshot(nutrients: dict, quantity_g: float) -> dict:
     }
 
 
-def update_entry_quantity(user_id: int, entry_id: int, quantity_g: float) -> dict:
+def update_entry_quantity(user_id: int, entry_id: int, quantity_g: float,
+                          manual: bool = False) -> dict:
     """Change an entry's quantity and recompute its snapshot. Used by the
-    follow-up refinement flow ('say more' / 'add photo' after logging)."""
+    follow-up refinement flow ('say more' / 'add photo' after logging) and by the
+    portion picker. `manual=True` records that the USER chose this number, which
+    makes it a verified anchor for future logs of the same food."""
     with get_conn() as conn:
         row = conn.execute(
             "SELECT user_id, food_id FROM log_entries WHERE id=?", (entry_id,)
@@ -121,10 +124,15 @@ def update_entry_quantity(user_id: int, entry_id: int, quantity_g: float) -> dic
         raise FoodNotFound(f"Food for entry {entry_id} not found")
     snapshot = _snapshot(food["nutrients_per_100g"], quantity_g)
     with get_conn() as conn:
-        conn.execute(
-            "UPDATE log_entries SET quantity_g=?, nutrients_snapshot_json=? WHERE id=?",
-            (quantity_g, json.dumps(snapshot), entry_id),
-        )
+        if manual:
+            conn.execute(
+                """UPDATE log_entries SET quantity_g=?, nutrients_snapshot_json=?,
+                   portion_manual=1 WHERE id=?""",
+                (quantity_g, json.dumps(snapshot), entry_id))
+        else:
+            conn.execute(
+                "UPDATE log_entries SET quantity_g=?, nutrients_snapshot_json=? WHERE id=?",
+                (quantity_g, json.dumps(snapshot), entry_id))
         label = source_label(conn, food["id"], food["source"])
     return {"id": entry_id, "food_id": food["id"], "food_name": food["name"],
             "food_brand": food.get("brand"), "quantity_g": quantity_g,
