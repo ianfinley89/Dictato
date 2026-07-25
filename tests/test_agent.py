@@ -211,11 +211,24 @@ def test_tool_log_food_servings_math(client):
     food_id = _seed_food(serving_g=9.0)
     from app.services.agent import _tool_log_food
     logged = []
-    out = asyncio.run(_tool_log_food(uid, {"food_id": food_id, "servings": 3}, "voice", "note", logged))
+    out = asyncio.run(_tool_log_food(uid, {"food_id": food_id, "basis": "count", "servings": 3},
+                                     "voice", "three rice cakes", logged))
     assert out["logged"] and out["quantity_g"] == pytest.approx(27.0)
     assert out["portion_basis"] == "count"
     assert len(logged) == 1
-    assert logged[0]["portion_confidence"] == "high"
+    assert logged[0]["portion_confidence"] == "high"   # the user really counted
+
+
+def test_inferred_count_is_not_high_confidence(client):
+    """Same math, honest confidence: the user never said a number."""
+    uid = _register(client)
+    food_id = _seed_food(serving_g=9.0)
+    from app.services.agent import _tool_log_food
+    logged = []
+    out = asyncio.run(_tool_log_food(uid, {"food_id": food_id, "basis": "count", "servings": 3},
+                                     "voice", "an order of rice cakes", logged))
+    assert out["quantity_g"] == pytest.approx(27.0)
+    assert logged[0]["portion_confidence"] == "low"
 
 
 def test_tool_log_food_unknown_id_returns_error(client):

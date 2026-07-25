@@ -1,7 +1,7 @@
 """Portion ladder: the model reports observations, this math must be exact."""
 from app.services.portion import (
     parse_usda_portions, match_household, resolve_grams, guard_grams,
-    snap_estimate,
+    snap_estimate, stated_number, verify_claims,
 )
 
 RICE = {"id": 1, "name": "Rice, white, cooked", "serving_g": None,
@@ -23,9 +23,20 @@ def test_label_weight_trusted():
 
 # ── Rung 2: count x serving_g ────────────────────────────────────────────────
 def test_count_uses_serving_g():
-    r = resolve_grams(TACO, {"quantity_g": 500, "basis": "count", "servings": 3})
+    r = resolve_grams(TACO, {"quantity_g": 500, "basis": "count", "servings": 3,
+                             "count_verified": True})
     assert r["grams"] == 3 * 102.0          # NOT the model's 500g guess
     assert r["basis"] == "count" and r["confidence"] == "high"
+
+
+def test_unverified_count_keeps_math_but_loses_confidence():
+    """"an order of X" -> the model invented the count. The serving math is still
+    the best anchor, but calling it high-confidence was a broken promise
+    (26% of such entries were >50% wrong on Menu-Match)."""
+    r = resolve_grams(TACO, {"quantity_g": 500, "basis": "count", "servings": 3})
+    assert r["grams"] == 3 * 102.0          # math unchanged
+    assert r["basis"] == "count" and r["confidence"] == "low"
+    assert "inferred" in r["note"]
 
 
 def test_count_without_serving_g_falls_to_estimate():
@@ -75,6 +86,44 @@ def test_estimate_flagged_low():
 
 def test_nothing_resolves():
     assert resolve_grams(PLAIN, {"basis": "estimate"})["grams"] == 0
+
+
+# ── Basis verification (the model is an unreliable narrator about evidence) ──
+def test_stated_number_detects_real_quantities():
+    assert stated_number("150 grams of chicken")
+    assert stated_number("three tacos")
+    assert stated_number("half a pizza")
+
+
+def test_bare_article_is_not_a_stated_count():
+    """"an order of jasmine rice" names a container, not a count — this exact
+    pattern is what inflated confidence across all 123 calibration items."""
+    assert not stated_number("I had an order of jasmine rice")
+    assert not stated_number("a side salad")
+    assert not stated_number("")
+    assert not stated_number(None)
+
+
+def test_verify_label_only_in_photos():
+    photo = verify_claims({"basis": "label", "quantity_g": 35}, "photo", None)
+    voice = verify_claims({"basis": "label", "quantity_g": 35}, "voice", "beef jerky")
+    assert photo["basis"] == "label"
+    assert voice["basis"] == "estimate"
+    assert voice["quantity_g"] == 35          # grams never change
+
+
+def test_verify_stated_needs_a_number():
+    vague = verify_claims({"basis": "stated", "quantity_g": 150}, "voice", "some chicken")
+    exact = verify_claims({"basis": "stated", "quantity_g": 150}, "voice", "150g chicken")
+    assert vague["basis"] == "estimate" and exact["basis"] == "stated"
+
+
+def test_verify_marks_count_verification():
+    counted = verify_claims({"basis": "count", "servings": 3}, "voice", "three tacos")
+    guessed = verify_claims({"basis": "count", "servings": 1}, "voice", "an order of rice")
+    assert counted["count_verified"] is True
+    assert guessed["count_verified"] is False
+    assert guessed["basis"] == "count"        # basis kept; only trust changes
 
 
 # ── USDA foodPortions parsing ────────────────────────────────────────────────

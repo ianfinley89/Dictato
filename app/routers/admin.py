@@ -88,6 +88,21 @@ async def stats(request: Request, days: int = Query(14, ge=1, le=90)):
             (since,),
         ).fetchone()["n"]
 
+        # Portion ladder: which rung actually resolves real captures, and how
+        # often we flag a portion as guessed. Offline evals can't measure this
+        # (no dataset phrases food the way users do), so this IS the measurement.
+        portion_rows = conn.execute(
+            """SELECT json_extract(e.value, '$.portion_basis') AS basis,
+                      json_extract(e.value, '$.portion_confidence') AS confidence,
+                      COUNT(*) AS n,
+                      SUM(CASE WHEN json_extract(e.value, '$.portion_snapped') THEN 1 ELSE 0 END) AS snapped
+               FROM capture_log c, json_each(c.entries_json) e
+               WHERE c.created_at >= datetime('now', ?)
+                 AND json_extract(e.value, '$.portion_basis') IS NOT NULL
+               GROUP BY basis, confidence ORDER BY n DESC""",
+            (since,),
+        ).fetchall()
+
         # Per-user snapshot (all time signup, windowed activity).
         per_user = conn.execute(
             """SELECT u.id, u.display_name, DATE(u.created_at) AS joined,
@@ -120,6 +135,7 @@ async def stats(request: Request, days: int = Query(14, ge=1, le=90)):
         "daily": [dict(r) for r in daily],
         "tokens_daily": [dict(r) for r in tokens],
         "entry_sources": [dict(r) for r in sources],
+        "portion_basis": [dict(r) for r in portion_rows],
         "per_user": [dict(r) for r in per_user],
     }
 

@@ -47,6 +47,45 @@ _MAX_SERVING_MULT = 20.0       # >20 servings of one food in one log is a misfir
 
 _DESC_RE = re.compile(r"^\s*(\d+(?:\.\d+)?(?:\s+\d+/\d+)?|\d+/\d+)\s+(.+)$")
 
+# Explicit quantity words. Bare "a"/"an" is deliberately EXCLUDED: "an order of
+# jasmine rice" names a container, not a count of the food, and treating it as a
+# stated count is exactly what handed unearned confidence to blind guesses
+# (see scripts/calibrate_confidence.py).
+_NUMBER_WORDS = {"one", "two", "three", "four", "five", "six", "seven", "eight",
+                 "nine", "ten", "eleven", "twelve", "dozen", "couple", "several",
+                 "half", "quarter", "third"}
+_DIGIT_RE = re.compile(r"\d")
+
+
+def stated_number(words: str | None) -> bool:
+    """Did the user actually SAY a quantity (digit or explicit number word)?"""
+    if not words:
+        return False
+    if _DIGIT_RE.search(words):
+        return True
+    return bool(set(re.findall(r"[a-z]+", words.lower())) & _NUMBER_WORDS)
+
+
+def verify_claims(inp: dict, method: str, words: str | None) -> dict:
+    """Strip unearned confidence from the model's own basis claim — the model is
+    an unreliable narrator about the EVIDENCE it had, even when its grams are
+    reasonable. A package label can only be READ in a photo; a 'stated' weight
+    needs a number in the user's words; a 'count' is only trustworthy when the
+    user actually counted (else it is the model inventing "1 order"). Downgrades
+    never change the resolved grams — only how much the system trusts them."""
+    basis = (inp.get("basis") or "").strip().lower()
+    out = dict(inp)
+    has_num = stated_number(words)
+    if basis == "label" and method != "photo":
+        out["basis"] = "estimate"
+    elif basis == "stated" and not has_num:
+        out["basis"] = "estimate"
+    elif basis == "count":
+        # Keep the count MATH (servings x serving_g beats a raw guess) but tell
+        # the truth about confidence.
+        out["count_verified"] = has_num
+    return out
+
 
 def _norm_unit(unit: str) -> str:
     u = (unit or "").strip().lower().rstrip(".")
@@ -132,10 +171,16 @@ def resolve_grams(food: dict, inp: dict) -> dict:
     if basis in ("stated", "label") and qty_g > 0:
         return {"grams": qty_g, "basis": basis, "confidence": "high", "note": None}
 
-    # Rung 2: count x the food's known serving weight.
+    # Rung 2: count x the food's known serving weight. The MATH is trusted either
+    # way; the CONFIDENCE depends on whether the user really counted (an
+    # unverified count measured no better than a blind guess — 32.7% vs 34.1%
+    # median error over 123 Menu-Match items).
     if servings > 0 and food.get("serving_g"):
+        verified = bool(inp.get("count_verified"))
         return {"grams": servings * food["serving_g"], "basis": "count",
-                "confidence": "high", "note": f"{servings:g} x {food['serving_g']:g}g serving"}
+                "confidence": "high" if verified else "low",
+                "note": f"{servings:g} x {food['serving_g']:g}g serving"
+                        + ("" if verified else " (count inferred, not stated)")}
 
     # Rung 3: household measure.
     if h_qty > 0 and h_unit:

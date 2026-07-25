@@ -1218,6 +1218,21 @@ function renderAdmin(s, failures) {
       <div class="gp-track"><div class="gp-fill" style="width:${(r.n / totalEntries) * 100}%"></div></div>
     </div>`).join('') : '<p class="empty-state">No entries yet.</p>';
 
+  // Portion ladder: which rung resolved real captures (offline evals can't
+  // measure this — no dataset phrases portions the way users speak).
+  const pb = s.portion_basis || [];
+  const pbTotal = pb.reduce((a, r) => a + r.n, 0) || 1;
+  const guessed = pb.filter(r => r.confidence === 'low').reduce((a, r) => a + r.n, 0);
+  const snapped = pb.reduce((a, r) => a + (r.snapped || 0), 0);
+  $('admin-portions').innerHTML = pb.length ? pb.map(r => `
+    <div class="gp-row">
+      <div class="gp-head"><span class="gp-label">${esc(r.basis)} <span class="portion-flag">(${esc(r.confidence || '?')})</span></span>
+        <span class="gp-vals">${r.n} (${Math.round(100 * r.n / pbTotal)}%)</span></div>
+      <div class="gp-track"><div class="gp-fill" style="width:${(r.n / pbTotal) * 100}%"></div></div>
+    </div>`).join('') +
+    `<p class="bar-caption">${Math.round(100 * guessed / pbTotal)}% of entries flagged "portion guessed" · ${snapped} estimate${snapped === 1 ? '' : 's'} snapped to a portion anchor</p>`
+    : '<p class="empty-state">No portion data yet (logs made before the ladder shipped).</p>';
+
   $('admin-users').innerHTML =
     '<tr><th>User</th><th>Joined</th><th>Last active</th><th>Captures</th><th>Entries</th><th>Tokens</th></tr>' +
     s.per_user.map(u => `<tr>

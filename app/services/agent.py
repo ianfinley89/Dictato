@@ -12,7 +12,6 @@ user has logged before — no model call at all.
 """
 import base64
 import json
-import re
 from datetime import datetime, timedelta, timezone
 
 from app.database import get_conn
@@ -22,7 +21,8 @@ from app.services.food_lookup import search_foods, get_food_by_id, ensure_portio
 from app.services.logging import (log_entry_for_user, update_entry_quantity,
                                   remove_entry, FoodNotFound)
 from app.services.nutrition_guard import sanitize_per_100g
-from app.services.portion import resolve_grams, guard_grams, snap_estimate
+from app.services.portion import (resolve_grams, guard_grams, snap_estimate,
+                                  verify_claims)
 from app.services.profile import apply_profile_update
 from app.services.voice_parse import parse_local
 
@@ -336,17 +336,10 @@ async def _tool_log_food(user_id: int, inp: dict, method: str, note: str | None,
     food = get_food_by_id(food_id) if isinstance(food_id, int) else None
     if not food:
         return {"error": f"food_id {food_id} not found — search or create it first"}
-    # Deterministic basis verification (Menu-Match showed the model claiming
-    # 'label' on voice orders where no package exists): a label can only be READ
-    # in a photo, and 'stated' requires an actual number in the user's words.
-    # Downgrading only lowers confidence — the grams fall through unchanged.
-    basis = (inp.get("basis") or "").strip().lower()
-    if basis == "label" and method != "photo":
-        inp = {**inp, "basis": "estimate"}
-    elif basis == "stated" and not re.search(r"\d", note or ""):
-        # (Word-numbers like "half a pound" lose the high flag too — conservative
-        # by design; the grams are identical either way.)
-        inp = {**inp, "basis": "estimate"}
+    # Deterministic basis verification — the model is an unreliable narrator about
+    # the evidence it had (it claimed 'label' on voice-only restaurant orders, and
+    # 'count' on portions it invented). Downgrades never change the grams.
+    inp = verify_claims(inp, method, note)
     # A household observation may need the food's USDA portion weights — fetch once.
     if _num(inp.get("household_qty")) > 0 and food.get("portions") is None:
         food = await ensure_portions(food)
