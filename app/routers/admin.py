@@ -20,12 +20,38 @@ from app.auth import get_current_user_id
 from app.config import ADMIN_EMAILS
 from app.database import get_conn
 from app.services.triage import CATEGORIES
+from app.services.fatsecret import health as fatsecret_health
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
 
-# Approximate $/1M tokens at Claude Haiku rates; a rough gauge, not a bill.
-_IN_PER_M = 1.00
-_OUT_PER_M = 5.00
+# Approximate $/1M tokens (input, output) per model — a rough gauge, not a bill.
+# Per-model because features route independently: photos run a cheap VLM while
+# text stays on Haiku, so one blended rate misreports spend badly (Haiku rates
+# overstate a Gemini flash-lite photo call about 4x).
+_RATES = {
+    "claude-haiku-4-5": (1.00, 5.00),
+    "claude-sonnet": (3.00, 15.00),
+    "claude-opus": (5.00, 25.00),
+    "gemini-3.1-flash-lite": (0.25, 1.50),
+    "gemini-3.1-flash": (0.50, 3.00),
+    "deepseek": (0.30, 1.20),
+    "gemma": (0.0, 0.0),          # self-hosted
+    "qwen": (0.0, 0.0),
+}
+_DEFAULT_RATE = (1.00, 5.00)      # unknown model: assume Haiku-ish
+
+
+def _rate(model: str | None) -> tuple[float, float]:
+    m = (model or "").lower()
+    for key, rate in _RATES.items():
+        if key in m:
+            return rate
+    return _DEFAULT_RATE
+
+
+def _cost(model: str | None, tin: int, tout: int) -> float:
+    rin, rout = _rate(model)
+    return tin / 1e6 * rin + tout / 1e6 * rout
 
 
 def _require_admin(request: Request) -> int:
@@ -82,6 +108,17 @@ async def stats(request: Request, days: int = Query(14, ge=1, le=90)):
             (since,),
         ).fetchall()
 
+        # Cost per model, from traces (which record the resolved model). Tokens in
+        # ai_usage have no model attached, so it can only give a blended guess.
+        by_model = conn.execute(
+            """SELECT model, COUNT(*) AS calls,
+                      COALESCE(SUM(input_tokens),0) AS tin,
+                      COALESCE(SUM(output_tokens),0) AS tout
+               FROM model_traces WHERE created_at >= datetime('now', ?)
+               GROUP BY model ORDER BY (SUM(input_tokens)+SUM(output_tokens)) DESC""",
+            (since,),
+        ).fetchall()
+
         coach_msgs = conn.execute(
             """SELECT COUNT(*) AS n FROM coach_messages
                WHERE role='user' AND created_at >= datetime('now', ?)""",
@@ -130,8 +167,16 @@ async def stats(request: Request, days: int = Query(14, ge=1, le=90)):
             "coach_messages": coach_msgs,
             "input_tokens": tin,
             "output_tokens": tout,
-            "est_cost_usd": round(tin / 1e6 * _IN_PER_M + tout / 1e6 * _OUT_PER_M, 2),
+            "est_cost_usd": round(sum(_cost(r["model"], r["tin"], r["tout"])
+                                      for r in by_model), 2),
         },
+        # Per-model spend; traces are purged after 30 days, so longer windows
+        # under-report cost even though the token totals above are complete.
+        "by_model": [{**dict(r), "est_cost_usd": round(_cost(r["model"], r["tin"], r["tout"]), 2)}
+                     for r in by_model],
+        # Food-source health: a silently-failing integration is invisible
+        # otherwise (lookups just fall through to the next source).
+        "integrations": {"fatsecret": fatsecret_health()},
         "daily": [dict(r) for r in daily],
         "tokens_daily": [dict(r) for r in tokens],
         "entry_sources": [dict(r) for r in sources],

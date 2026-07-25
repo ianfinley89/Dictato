@@ -1409,8 +1409,7 @@ button:focus-visible, input:focus-visible, .chip:focus-visible {
 
 /* ═══ Create-food & report-issue modals ═══ */
 #create-overlay,
-#issue-overlay,
-#photo-note-overlay {
+#issue-overlay {
   position: fixed;
   inset: 0;
   z-index: 850;

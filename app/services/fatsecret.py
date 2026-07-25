@@ -4,6 +4,7 @@ License note: results may not be stored locally beyond FATSECRET_TTL_HOURS, so e
 cached `foods` row carries an `expires_at`; a cleanup purges expired, unlogged rows.
 Foods the user actually logged keep their snapshot (the user's own diary record).
 """
+import logging
 import re
 import json
 import time
@@ -11,10 +12,35 @@ import httpx
 from datetime import datetime, timezone, timedelta
 from app.config import FATSECRET_CLIENT_ID, FATSECRET_CLIENT_SECRET, FATSECRET_TTL_HOURS
 
+log = logging.getLogger(__name__)
+
 _TOKEN_URL = "https://oauth.fatsecret.com/connect/token"
 _API_URL = "https://platform.fatsecret.com/rest/server.api"
 
 _token = {"value": None, "exp": 0.0}
+
+# Failures here must never break a lookup (we just fall through to the next
+# source) — but they must not be INVISIBLE either. Silently returning [] hid a
+# config error (FatSecret error 21: this host's IP is not allow-listed in their
+# dev console) that disabled the whole source for weeks. Surfaced in the admin
+# pane via health().
+_health = {"ok": None, "at": None, "message": None}
+
+
+def _note_failure(message: str) -> None:
+    _health.update({"ok": False, "message": message[:300],
+                    "at": datetime.now(timezone.utc).isoformat(timespec="seconds")})
+    log.warning("FatSecret lookup unavailable: %s", message[:300])
+
+
+def _note_ok() -> None:
+    _health.update({"ok": True, "message": None,
+                    "at": datetime.now(timezone.utc).isoformat(timespec="seconds")})
+
+
+def health() -> dict:
+    """Last known state of this integration, for the admin pane."""
+    return {"enabled": enabled(), **_health}
 
 # "Per 100g - Calories: 52kcal | Fat: 0.17g | Carbs: 13.81g | Protein: 0.26g"
 _DESC_RE = re.compile(
@@ -60,8 +86,16 @@ async def search_fatsecret(query: str, limit: int = 10) -> list[dict]:
                 headers={"Authorization": f"Bearer {token}"},
             )
         if r.status_code != 200:
+            _note_failure(f"HTTP {r.status_code}")
             return []
-        foods = (r.json() or {}).get("foods") or {}
+        payload = r.json() or {}
+        # FatSecret reports auth/IP problems as HTTP 200 with an error body.
+        if isinstance(payload.get("error"), dict):
+            err = payload["error"]
+            _note_failure(f"error {err.get('code')}: {err.get('message')}")
+            return []
+        _note_ok()
+        foods = payload.get("foods") or {}
         items = foods.get("food")
         if not items:
             return []
@@ -69,7 +103,8 @@ async def search_fatsecret(query: str, limit: int = 10) -> list[dict]:
             items = [items]
         expires = (datetime.now(timezone.utc) + timedelta(hours=FATSECRET_TTL_HOURS)).isoformat()
         return [f for it in items if (f := _parse(it, expires))]
-    except Exception:
+    except Exception as e:
+        _note_failure(repr(e))
         return []
 
 

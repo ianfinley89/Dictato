@@ -150,10 +150,10 @@ def test_fast_path_other_users_history_does_not_leak(client):
 def test_tool_create_food_estimate(client):
     uid = _register(client)
     from app.services.agent import _tool_create_food
-    out = _tool_create_food(uid, {
+    out = asyncio.run(_tool_create_food(uid, {
         "name": "Homemade Stew", "values_per": "100g", "calories": 95, "protein_g": 7,
         "carbs_g": 8, "fat_g": 3.5, "basis": "estimate", "serving_g": 350,
-    })
+    }))
     assert out["created"] and out["source"] == "estimate"
     from app.services.food_lookup import get_food_by_id
     food = get_food_by_id(out["food_id"])
@@ -167,12 +167,12 @@ def test_tool_create_food_converts_per_serving_values(client):
     per-100g. The server does the conversion so the model can't get it wrong."""
     uid = _register(client)
     from app.services.agent import _tool_create_food
-    out = _tool_create_food(uid, {
+    out = asyncio.run(_tool_create_food(uid, {
         "name": "White Cheddar Rice Cakes", "brand": "Quaker",
         "values_per": "serving", "serving_g": 11,
         "calories": 60, "protein_g": 1, "carbs_g": 12, "fat_g": 1,
         "basis": "web", "source_url": "https://example.com",
-    })
+    }))
     from app.services.food_lookup import get_food_by_id
     food = get_food_by_id(out["food_id"])
     assert food["nutrients_per_100g"]["calories"] == pytest.approx(545.45, abs=0.1)
@@ -182,21 +182,21 @@ def test_tool_create_food_converts_per_serving_values(client):
 def test_tool_create_food_per_serving_requires_serving_g(client):
     uid = _register(client)
     from app.services.agent import _tool_create_food
-    out = _tool_create_food(uid, {
+    out = asyncio.run(_tool_create_food(uid, {
         "name": "Mystery Snack", "values_per": "serving",
         "calories": 60, "protein_g": 1, "carbs_g": 12, "fat_g": 1, "basis": "web",
-    })
+    }))
     assert "error" in out
 
 
 def test_tool_create_food_web_is_public_and_sanitized(client):
     uid = _register(client)
     from app.services.agent import _tool_create_food
-    out = _tool_create_food(uid, {
+    out = asyncio.run(_tool_create_food(uid, {
         "name": "Mega Burrito", "brand": "Chipotle", "values_per": "100g",
         "calories": 99999, "protein_g": 12, "carbs_g": 14, "fat_g": 9, "basis": "web",
         "source_url": "https://example.com/nutrition",
-    })
+    }))
     from app.services.food_lookup import get_food_by_id
     food = get_food_by_id(out["food_id"])
     assert food["source"] == "web"
@@ -615,6 +615,57 @@ def test_revision_updates_and_adds_entries(client, monkeypatch):
     with get_conn() as conn:
         q = conn.execute("SELECT quantity_g FROM log_entries WHERE id=?", (entry_id,)).fetchone()
     assert q["quantity_g"] == pytest.approx(45.0)
+
+
+def test_corrective_followup_tags_what_was_wrong(client, monkeypatch):
+    """"That was mislabeled — it was a bottle of Gatorade, not 1 litre."
+    The tools the model reaches for classify the correction deterministically, so
+    the capture carries typed labels (the non-circular signal for whether the
+    original log was wrong, and how)."""
+    from app.routers import agent as agent_router
+    monkeypatch.setattr(agent_router, "ANTHROPIC_API_KEY", "test-key")
+    uid = _register(client)
+    _seed_food(name="gatorade", serving_g=591.0)
+    _seed_food(name="banana", serving_g=118.0)
+
+    _log_once(uid, 1)
+    r1 = client.post("/api/agent/log", data={"text": "I had a gatorade"})
+    cap_id, entry_id = r1.json()["capture_id"], r1.json()["entries"][0]["id"]
+
+    _script_llm(monkeypatch, [
+        _tool("update_entry", {"entry_id": entry_id, "quantity_g": 591}, "t1"),
+        _tool("log_food", {"food_id": 2, "basis": "count", "servings": 1,
+                           "quantity_g": 118}, "t2"),
+        _text("Fixed the bottle size and added the banana."),
+    ])
+    r2 = client.post("/api/agent/log", data={
+        "text": "that was mislabeled, I had a bottle of gatorade not 1 liter, plus a banana",
+        "revise_capture_id": str(cap_id)})
+    assert r2.status_code == 200
+    tags = r2.json()["annotation"]["tags"]
+    assert "correction:portion" in tags        # update_entry fired
+    assert "correction:missed-item" in tags    # a new item appeared in revision
+
+    with get_conn() as conn:
+        row = conn.execute("SELECT tags_json FROM capture_log WHERE id=?",
+                           (r2.json()["capture_id"],)).fetchone()
+    assert "correction:portion" in json.loads(row["tags_json"])
+
+
+def test_first_pass_logs_are_never_tagged_as_corrections(client, monkeypatch):
+    """Only a follow-up can be a correction — a fresh capture logging food is not."""
+    from app.routers import agent as agent_router
+    monkeypatch.setattr(agent_router, "ANTHROPIC_API_KEY", "test-key")
+    _register(client)
+    _seed_food()
+    _script_llm(monkeypatch, [
+        _tool("log_food", {"food_id": 1, "basis": "count", "servings": 2,
+                           "quantity_g": 18}, "t1"),
+        _text("Logged two rice cakes."),
+    ])
+    r = client.post("/api/agent/log", data={"text": "two rice cakes"})
+    tags = r.json()["annotation"].get("tags") or []
+    assert not any(t.startswith("correction:") for t in tags)
 
 
 def test_revision_can_remove_entries(client, monkeypatch):

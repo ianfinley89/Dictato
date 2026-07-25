@@ -1,5 +1,6 @@
 import httpx
 import json
+import re
 from typing import Optional
 from app.config import USDA_API_KEY
 from app.database import get_conn
@@ -324,6 +325,35 @@ def _row_to_food(row) -> dict:
         # None = portions never fetched; [] = fetched, USDA has none.
         "portions": json.loads(portions_raw) if portions_raw else None,
     }
+
+
+def _norm_name(s: str) -> str:
+    """Loose name key: lowercase, punctuation-free, plural-tolerant."""
+    words = [w[:-1] if len(w) > 3 and w.endswith("s") else w
+             for w in re.findall(r"[a-z0-9]+", (s or "").lower())]
+    return " ".join(words)
+
+
+async def strong_db_match(name: str, user_id: int) -> Optional[dict]:
+    """A database food that IS the thing being described — the same dish by name,
+    not merely a related one. Used to enforce hard rule #1 in code: the agent may
+    not invent nutrition for a dish the database already knows.
+
+    Deliberately strict (exact normalized name, or the candidate's lead noun) so
+    a genuinely new BRANDED item ("oberto beef jerky" vs generic "Beef Jerky")
+    still gets created."""
+    key = _norm_name(name)
+    if not key:
+        return None
+    try:
+        for f in await search_foods(name, user_id, limit=6):
+            if f.get("source") in ("user", "recipe", "estimate"):
+                continue          # private/AI rows aren't authority over a new one
+            if key in (_norm_name(f["name"]), _norm_name(_lead_noun(f["name"]))):
+                return f
+    except Exception:
+        return None
+    return None
 
 
 async def ensure_portions(food: dict) -> dict:

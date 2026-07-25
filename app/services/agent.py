@@ -12,12 +12,14 @@ user has logged before — no model call at all.
 """
 import base64
 import json
+import re
 from datetime import datetime, timedelta, timezone
 
 from app.database import get_conn
 from app.services import llm
 from app.services.ai_usage import record_tokens
-from app.services.food_lookup import search_foods, get_food_by_id, ensure_portions
+from app.services.food_lookup import (search_foods, get_food_by_id, ensure_portions,
+                                      strong_db_match)
 from app.services.logging import (log_entry_for_user, update_entry_quantity,
                                   remove_entry, FoodNotFound)
 from app.services.nutrition_guard import sanitize_per_100g
@@ -203,6 +205,10 @@ frame (soda can, fork, credit card, standard ~27cm dinner plate), use it as a \
 scale reference for portion sizes and NAME it in your final sentence ("judging by \
 the fork, ..."); if none is present, estimate normally — never claim a reference \
 you don't clearly see.
+4b. A container is NOT a portion: "a bottle of Gatorade" means the bottle's real \
+size (a 20 oz bottle, a 1 L bottle — use household_qty/household_unit or the \
+product's serving), never a round default like exactly 1 litre. Same for "a can", \
+"a cup", "a bowl".
 5. When a specific restaurant is named and there is no matching branded candidate, \
 web_search that restaurant's item FIRST — portion style (whole vs segments, basket \
 size, breaded or not) and published calorie estimates — then log the generic \
@@ -293,12 +299,54 @@ def _clamp(v, lo, hi):
     return max(lo, min(hi, _num(v)))
 
 
-def _tool_create_food(user_id: int, inp: dict) -> dict:
+# A "brand" that names no actual brand. The model has passed things like
+# "Italian Restaurant" as a brand to justify inventing a dish the database
+# already had — the same unearned-claim move as an invented portion count.
+_GENERIC_BRAND_WORDS = {
+    "restaurant", "restaurants", "diner", "cafe", "café", "bistro", "deli",
+    "grill", "bar", "pub", "eatery", "kitchen", "place", "joint", "chain",
+    "local", "generic", "homemade", "house", "food", "fast", "takeout",
+    "italian", "asian", "chinese", "mexican", "thai", "indian", "japanese",
+    "american", "french", "greek", "korean", "vietnamese", "mediterranean",
+    "the", "a", "an", "some", "unknown", "various", "n/a", "none",
+}
+
+
+def _real_brand(brand: str | None) -> str | None:
+    """None unless the brand names an actual product/company."""
+    b = (brand or "").strip().lower()
+    if not b:
+        return None
+    words = [w for w in re.findall(r"[a-z0-9'&]+", b)]
+    if not words or all(w in _GENERIC_BRAND_WORDS for w in words):
+        return None
+    return b
+
+
+async def _tool_create_food(user_id: int, inp: dict) -> dict:
     name = (inp.get("name") or "").strip().lower()
     if not name:
         return {"error": "name is required"}
+    brand = _real_brand(inp.get("brand"))
+
+    # Hard rule #1, enforced in code rather than trusted to the prompt: if the
+    # database already knows this dish, the model may not mint its own numbers
+    # for it. A genuinely new BRANDED product still passes (its name differs).
+    if not brand:
+        existing = await strong_db_match(name, user_id)
+        if existing:
+            return {"error": f"'{existing['name']}' (food_id {existing['id']}) is already "
+                             f"in the database — log THAT with log_food instead of creating "
+                             f"a duplicate. Set the quantity to match the portion eaten "
+                             f"(restaurant servings can be larger than the default).",
+                    "use_food_id": existing["id"]}
+
     basis = inp.get("basis")
-    source = "web" if basis == "web" else "estimate"
+    source_url = (inp.get("source_url") or "").strip()
+    # 'web' means "published numbers someone can check" — it requires a citation.
+    # Without one this is the model's own estimate and must be labelled as such,
+    # so the source shown to the user is always true.
+    source = "web" if (basis == "web" and source_url) else "estimate"
     serving_g = inp.get("serving_g")
     serving_g = _clamp(serving_g, 1, 2000) if serving_g else None
 
@@ -323,8 +371,7 @@ def _tool_create_food(user_id: int, inp: dict) -> dict:
             """INSERT INTO foods (source, source_id, name, brand, serving_desc, serving_g,
                                   nutrients_json, created_by_user_id)
                VALUES (?,?,?,?,?,?,?,?)""",
-            (source, (inp.get("source_url") or "").strip() or None, name,
-             (inp.get("brand") or "").strip().lower() or None,
+            (source, source_url or None, name, brand,
              (inp.get("serving_desc") or "").strip() or None, serving_g,
              json.dumps(nutrients), user_id),
         )
@@ -427,7 +474,17 @@ def _tool_remove_entry(user_id: int, inp: dict) -> dict:
 
 async def _execute_tool(name: str, inp: dict, user_id: int, method: str,
                         note: str | None, logged: list, annotation: dict,
-                        existing_food_ids: dict | None = None) -> dict:
+                        existing_food_ids: dict | None = None,
+                        corrections: list | None = None) -> dict:
+    # In a follow-up ("that was wrong — it was a bottle, not a litre") the tools
+    # the model reaches for ARE the correction taxonomy: what it changed says what
+    # was wrong. Deterministic, no self-report, no extra tokens.
+    revising = existing_food_ids is not None
+
+    def _corr(kind: str) -> None:
+        if revising and corrections is not None and kind not in corrections:
+            corrections.append(kind)
+
     if name == "search_food_db":
         query = (inp.get("query") or "").strip()
         if not query:
@@ -435,7 +492,7 @@ async def _execute_tool(name: str, inp: dict, user_id: int, method: str,
         foods = await search_foods(query, user_id, limit=6, brand=(inp.get("brand") or None))
         return {"candidates": _fmt_candidates(foods)} if foods else {"candidates": [], "note": "no matches — try a simpler name, or web_search/create_food"}
     if name == "create_food":
-        return _tool_create_food(user_id, inp)
+        return await _tool_create_food(user_id, inp)
     if name == "log_food":
         # Revision guard: the same food again means adjust, not duplicate.
         fid = inp.get("food_id")
@@ -443,13 +500,22 @@ async def _execute_tool(name: str, inp: dict, user_id: int, method: str,
             return {"error": f"food_id {fid} is already logged as entry "
                              f"{existing_food_ids[fid]} — use update_entry with the "
                              f"new TOTAL grams instead of logging it again"}
-        return await _tool_log_food(user_id, inp, method, note, logged)
+        out = await _tool_log_food(user_id, inp, method, note, logged)
+        if out.get("logged"):
+            _corr("correction:missed-item")
+        return out
     if name == "annotate_capture":
         return _tool_annotate(user_id, inp, annotation)
     if name == "update_entry":
-        return _tool_update_entry(user_id, inp)
+        out = _tool_update_entry(user_id, inp)
+        if out.get("updated"):
+            _corr("correction:portion")
+        return out
     if name == "remove_entry":
-        return _tool_remove_entry(user_id, inp)
+        out = _tool_remove_entry(user_id, inp)
+        if out.get("removed"):
+            _corr("correction:wrong-item")
+        return out
     return {"error": f"unknown tool {name}"}
 
 
@@ -472,11 +538,7 @@ async def run_agent(user_id: int, *, text: str | None = None,
     """Run the logging loop. `revision` = {entries, transcript} switches to
     reconcile-an-existing-log mode. Returns {summary, entries, annotation, turns}."""
     user_text = None
-    if text and image and not revision:
-        # Photo capture with the optional context note — what the camera can't
-        # see (cooking fat, milk type, how much was eaten) lives in the note.
-        user_text = f"Log this meal photo. The user's note about it: {text}"
-    elif text:
+    if text:
         user_text = f"Transcript: {text}"
     elif image:
         user_text = "Log this meal photo." if not revision else "Here's a photo of the meal I just logged."
@@ -505,6 +567,7 @@ async def run_agent(user_id: int, *, text: str | None = None,
     messages = [user_msg]
     logged: list[dict] = []
     annotation: dict = {}
+    corrections: list[str] = []
     summary = ""
 
     # Route photo captures to the vision model, voice/text to the text model.
@@ -533,7 +596,8 @@ async def run_agent(user_id: int, *, text: str | None = None,
         results = []
         for tc in resp.tool_calls:
             out = await _execute_tool(tc.name, tc.input, user_id, method, note,
-                                      logged, annotation, existing_food_ids)
+                                      logged, annotation, existing_food_ids,
+                                      corrections)
             results.append({"id": tc.id, "name": tc.name, "content": json.dumps(out)})
         if not results:
             break
@@ -549,8 +613,15 @@ async def run_agent(user_id: int, *, text: str | None = None,
             summary = "I couldn't identify anything to log — try rephrasing or log it manually."
     if logged and not annotation.get("meal"):
         annotation.setdefault("meal", local_hour_meal(tz_offset))
+    # Typed correction labels ride on the capture's tags, so they reach the admin
+    # pane, the coach's context and the training dataset. This is the honest,
+    # non-circular signal for "was the original log wrong, and how?" — the thing
+    # accepted labels could never tell us.
+    if corrections:
+        tags = list(annotation.get("tags") or [])
+        annotation["tags"] = tags + [c for c in corrections if c not in tags]
     return {"summary": summary, "entries": logged, "annotation": annotation,
-            "turns": turn + 1, "error": error}
+            "turns": turn + 1, "error": error, "corrections": corrections}
 
 
 def fast_path_annotation(transcript: str, entries: list[dict], tz_offset: int = 0) -> dict:

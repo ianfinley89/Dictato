@@ -907,7 +907,7 @@ $('voice-overlay-cancel').addEventListener('click', () => {
 });
 
 // ── Agent logging (voice/photo → auto-logged entries + result card) ──────────
-async function submitAgentLog({ audio = null, image = null, photoUrl = '', text = null }) {
+async function submitAgentLog({ audio = null, image = null, photoUrl = '' }) {
   showVoiceMsg(audio ? 'Transcribing & logging…' : 'Analyzing & logging…');
 
   const form = new FormData();
@@ -917,7 +917,6 @@ async function submitAgentLog({ audio = null, image = null, photoUrl = '', text 
   if (reviseId) form.append('revise_capture_id', String(reviseId));
   if (audio) form.append('audio', audio, 'voice-note');
   if (image) form.append('image', image, 'meal.jpg');
-  if (text) form.append('text', text);   // optional photo context note
 
   let result;
   try {
@@ -958,47 +957,17 @@ photoInput.addEventListener('change', async () => {
     if (_currentPhotoUrl) URL.revokeObjectURL(_currentPhotoUrl);
     _currentPhotoUrl = URL.createObjectURL(blob);
 
-    if (_reviseCaptureId) {
-      // Follow-up photos already carry the original capture's context.
-      await submitAgentLog({ image: blob, photoUrl: _currentPhotoUrl });
-    } else {
-      // Optional context note — what the camera can't see (oil, milk type,
-      // how much will be eaten) is the highest-value hint a photo can get.
-      openPhotoNote(blob);
-    }
+    // Straight to the model: photo in, suggested entries out. A typed note
+    // alongside the image made the model treat the note as the authoritative
+    // list and skip what it could see, so the way to correct a photo log is the
+    // follow-up ("Say more" / Adjust) — after there's something to correct.
+    await submitAgentLog({ image: blob, photoUrl: _currentPhotoUrl });
   } catch (err) {
     voiceStatus.textContent = err.message;
     voiceStatus.classList.remove('hidden');
   } finally {
     photoBtn.classList.remove('busy');
   }
-});
-
-// ── Photo context note (one tap to skip: "Log it" with an empty note) ────────
-let _pendingPhoto = null;
-
-function openPhotoNote(blob) {
-  _pendingPhoto = blob;
-  voiceStatus.classList.add('hidden');
-  $('photo-note-input').value = '';
-  $('photo-note-overlay').classList.remove('hidden');
-  $('photo-note-input').focus();
-}
-
-async function submitPhotoNote() {
-  const note = $('photo-note-input').value.trim();
-  $('photo-note-overlay').classList.add('hidden');
-  const blob = _pendingPhoto;
-  _pendingPhoto = null;
-  if (!blob) return;
-  await submitAgentLog({ image: blob, text: note || null, photoUrl: _currentPhotoUrl });
-}
-
-$('photo-note-log').addEventListener('click', submitPhotoNote);
-$('photo-note-input').addEventListener('keydown', e => { if (e.key === 'Enter') submitPhotoNote(); });
-$('photo-note-cancel').addEventListener('click', () => {
-  _pendingPhoto = null;
-  $('photo-note-overlay').classList.add('hidden');
 });
 
 // Compress to JPEG with the longest edge capped at maxEdge (hard rule #3).
@@ -1220,6 +1189,33 @@ function renderAdmin(s, failures) {
         <span class="gp-vals">${r.n} (${Math.round(100 * r.n / totalEntries)}%)</span></div>
       <div class="gp-track"><div class="gp-fill" style="width:${(r.n / totalEntries) * 100}%"></div></div>
     </div>`).join('') : '<p class="empty-state">No entries yet.</p>';
+
+  // Integration health — a food source that fails silently is invisible.
+  const fs = (s.integrations || {}).fatsecret || {};
+  const fsEl = $('admin-integrations');
+  if (!fs.enabled) {
+    fsEl.innerHTML = '<p class="reminders-intro">FatSecret: not configured.</p>';
+  } else if (fs.ok === false) {
+    fsEl.innerHTML = `<p class="push-status err">FatSecret is FAILING — lookups silently fall through to other sources.<br>
+      ${esc(fs.message || '')}<br><span class="portion-flag">last checked ${esc(fs.at || '')}</span></p>`;
+  } else if (fs.ok) {
+    fsEl.innerHTML = `<p class="push-status">FatSecret OK <span class="portion-flag">(${esc(fs.at || '')})</span></p>`;
+  } else {
+    fsEl.innerHTML = '<p class="reminders-intro">FatSecret: configured, not used yet this run.</p>';
+  }
+
+  // Spend per model — features route independently, so a blended rate lies.
+  const bm = s.by_model || [];
+  $('admin-models').innerHTML = bm.length
+    ? '<tr><th>Model</th><th>Calls</th><th>In</th><th>Out</th><th>Est. $</th></tr>' +
+      bm.map(m => `<tr>
+        <td>${esc(m.model || '?')}</td>
+        <td>${m.calls}</td>
+        <td>${m.tin.toLocaleString()}</td>
+        <td>${m.tout.toLocaleString()}</td>
+        <td>$${m.est_cost_usd.toFixed(2)}</td>
+      </tr>`).join('')
+    : '<tr><td>No model calls in this window.</td></tr>';
 
   // Portion ladder: which rung resolved real captures (offline evals can't
   // measure this — no dataset phrases portions the way users speak).
