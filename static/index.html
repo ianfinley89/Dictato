@@ -129,6 +129,9 @@
     <div id="result-summary" class="ai-summary"></div>
     <div id="result-annotation" class="hidden"></div>
     <div id="result-entries"></div>
+    <div id="result-discard-row">
+      <button id="result-discard" class="link-btn danger-link">Discard this capture</button>
+    </div>
     <div id="result-clarify" class="hidden">
       <p id="clarify-msg" class="ann-hint"></p>
       <button id="clarify-type-link" class="link-btn">or type it</button>
@@ -389,6 +392,31 @@
 </div>
 
 <!-- Report an issue — modal, reachable from the result card and Settings -->
+<div id="food-edit-overlay" class="hidden">
+  <div class="create-card">
+    <div class="create-head">
+      <h3>Fix this food</h3>
+      <button id="fe-close" class="icon-btn" title="Close">
+        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+      </button>
+    </div>
+    <p class="reminders-intro">The AI created this one. Correct the name or the numbers from the package and we'll use them from now on.</p>
+    <form id="food-edit-form" class="goals-form">
+      <div class="goal-input-row"><label for="fe-name">Name</label><input type="text" id="fe-name" maxlength="120"></div>
+      <div class="goal-input-row"><label for="fe-brand">Brand</label><input type="text" id="fe-brand" maxlength="80"></div>
+      <p class="reminders-intro">Nutrition per 100g:</p>
+      <div class="goal-input-row"><label for="fe-cal">Calories</label><input type="number" id="fe-cal" min="0" max="2000" step="1"></div>
+      <div class="goal-input-row"><label for="fe-protein">Protein (g)</label><input type="number" id="fe-protein" min="0" max="100" step="0.1"></div>
+      <div class="goal-input-row"><label for="fe-carbs">Carbs (g)</label><input type="number" id="fe-carbs" min="0" max="100" step="0.1"></div>
+      <div class="goal-input-row"><label for="fe-fat">Fat (g)</label><input type="number" id="fe-fat" min="0" max="100" step="0.1"></div>
+      <div class="confirm-btns">
+        <button type="submit" class="btn-primary">Save</button>
+        <button type="button" id="fe-cancel" class="btn-secondary">Cancel</button>
+      </div>
+    </form>
+  </div>
+</div>
+
 <div id="issue-overlay" class="hidden">
   <div class="create-card">
     <div class="create-head">

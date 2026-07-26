@@ -235,11 +235,30 @@ def _off_kcal(n: dict) -> float:
     return round(float(kj or 0) / KCAL_PER_KJ, 1) if kj not in (None, "") else 0.0
 
 
+# The four fields that make an Open Food Facts row usable as a food.
+_OFF_NUTRIENT_KEYS = ("energy-kcal_100g", "energy-kj_100g", "energy_100g",
+                      "proteins_100g", "carbohydrates_100g", "fat_100g")
+
+
+def _off_has_nutrition(n: dict) -> bool:
+    """Does this row carry ANY measured nutrition?
+
+    Not the same question as "is it zero calories". Open Food Facts contains
+    non-food submissions (a 9V battery was sitting in our cache) whose nutrient
+    fields are simply ABSENT, while a genuine zero-calorie product states its
+    zeros explicitly — Coke Zero returns all four keys with values. Reading a
+    missing key as 0.0 erases that difference, which is how the battery got in.
+    """
+    return any(n.get(k) not in (None, "") for k in _OFF_NUTRIENT_KEYS)
+
+
 def _parse_off(item: dict) -> Optional[dict]:
     name = item.get("product_name", "").strip()
     if not name:
         return None
     n = item.get("nutriments", {})
+    if not _off_has_nutrition(n):
+        return None          # no nutrition data at all — not loggable, food or not
     nutrients = {
         "calories": _off_kcal(n),
         "protein_g": float(n.get("proteins_100g", 0) or 0),

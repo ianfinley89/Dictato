@@ -1,3 +1,5 @@
+import json
+
 from fastapi import APIRouter, Query, Request, HTTPException
 from pydantic import BaseModel
 from typing import Optional
@@ -5,6 +7,8 @@ from app.auth import get_current_user_id
 from app.services.food_lookup import search_foods, get_food_by_id, _row_to_food
 from app.services import ai
 from app.services.ai_usage import check_and_increment
+from app.services.nutrition_guard import sanitize_per_100g
+from app.services.logging import resync_entry_snapshot
 from app.config import ANTHROPIC_API_KEY, AI_DAILY_LIMIT
 from app.database import get_conn
 
@@ -14,6 +18,24 @@ router = APIRouter(prefix="/api/foods", tags=["foods"])
 class WebLookupRequest(BaseModel):
     name: str
     brand: Optional[str] = None
+
+
+class FoodEdit(BaseModel):
+    """Corrections to an AI-created food. Omitted fields are left alone, and
+    macros may be given per serving or per 100 g — the server converts, so a
+    user reading a package label never has to do the maths."""
+    name: Optional[str] = None
+    brand: Optional[str] = None
+    serving_g: Optional[float] = None
+    serving_desc: Optional[str] = None
+    values_per: Optional[str] = "100g"
+    calories: Optional[float] = None
+    protein_g: Optional[float] = None
+    carbs_g: Optional[float] = None
+    fat_g: Optional[float] = None
+    fiber_g: Optional[float] = None
+    # The entry that prompted this correction, so it reflects the fix too.
+    resync_entry_id: Optional[int] = None
 
 
 @router.post("/weblookup")
@@ -102,6 +124,65 @@ async def get_food(food_id: int, request: Request):
     if not _can_access(food_id, uid):
         raise HTTPException(404, "Food not found")
     return get_food_by_id(food_id)
+
+
+@router.put("/{food_id}")
+async def edit_food(food_id: int, body: FoodEdit, request: Request):
+    """Correct a food the AI created for you — its name, brand, or nutrition.
+
+    A voice capture heard "Kodiak" as "Kodak", and the resulting row was not only
+    wrong for that log but cached under the wrong name for every future one.
+    Only rows this user created and only AI-made sources ('web'/'estimate') are
+    editable: a USDA or Open Food Facts row is shared reference data and must not
+    be rewritten by one user, and existing log entries keep their own snapshots
+    either way (history stays stable, per the data model)."""
+    uid = get_current_user_id(request)
+    food = get_food_by_id(food_id)
+    if not food or not _can_access(food_id, uid):
+        raise HTTPException(404, "Food not found")
+    if food["source"] not in ("web", "estimate", "user"):
+        raise HTTPException(
+            403, f"{food['source'].upper()} foods are shared reference data and "
+                 f"can't be edited. Create your own version instead.")
+    if food.get("created_by_user_id") != uid:
+        raise HTTPException(403, "You can only edit foods you created.")
+
+    n = dict(food["nutrients_per_100g"])
+    per = (body.values_per or "100g").lower()
+    if per == "serving":
+        serving_g = body.serving_g or food.get("serving_g")
+        if not serving_g:
+            raise HTTPException(400, "serving_g is required when values_per='serving'")
+        factor = 100.0 / float(serving_g)
+    else:
+        factor = 1.0
+    for field, cap in (("calories", 2000), ("protein_g", 100), ("carbs_g", 100),
+                       ("fat_g", 100), ("fiber_g", 80)):
+        v = getattr(body, field, None)
+        if v is not None:
+            n[field] = max(0.0, min(cap, float(v) * factor))
+    # Same plausibility guard every other per-100g write goes through.
+    n, _ = sanitize_per_100g(n)
+
+    name = (body.name or food["name"]).strip().lower()[:120]
+    if not name:
+        raise HTTPException(400, "name cannot be empty")
+    brand = body.brand.strip().lower()[:80] if body.brand is not None else food.get("brand")
+    serving_g = body.serving_g if body.serving_g is not None else food.get("serving_g")
+    serving_desc = (body.serving_desc if body.serving_desc is not None
+                    else food.get("serving_desc"))
+
+    with get_conn() as conn:
+        conn.execute(
+            """UPDATE foods SET name=?, brand=?, serving_g=?, serving_desc=?,
+               nutrients_json=? WHERE id=?""",
+            (name, brand or None, serving_g, serving_desc, json.dumps(n), food_id))
+    updated = get_food_by_id(food_id)
+    if body.resync_entry_id:
+        entry = resync_entry_snapshot(uid, body.resync_entry_id)
+        if entry:
+            updated = {**updated, "resynced_entry": entry}
+    return updated
 
 
 def _can_access(food_id: int, uid: int) -> bool:

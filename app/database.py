@@ -278,6 +278,7 @@ def _migrate(conn) -> None:
         conn.execute("ALTER TABLE foods ADD COLUMN portions_json TEXT")
     _backfill_serving_g(conn)
     _repair_nutrients(conn)
+    _purge_nonfood_rows(conn)
 
     log_cols = {r["name"] for r in conn.execute("PRAGMA table_info(log_entries)")}
     for col in ("portion_basis", "portion_confidence"):
@@ -310,6 +311,28 @@ def _migrate(conn) -> None:
         conn.execute("ALTER TABLE issue_reports ADD COLUMN category TEXT")
     if "capture_id" not in iss_cols:
         conn.execute("ALTER TABLE issue_reports ADD COLUMN capture_id INTEGER")
+
+
+def _purge_nonfood_rows(conn) -> None:
+    """Drop cached Open Food Facts rows that carry no nutrition at all.
+
+    OFF accepts non-food submissions — a Kodak 9V battery was sitting in the food
+    cache, reachable from a brand search. Older rows can't be told apart from a
+    genuine zero-calorie product after the fact (the parser used to flatten a
+    MISSING value to 0.0), so this only removes rows NOTHING has been logged
+    against: a real zero-calorie food someone actually ate is referenced and
+    stays, and anything deleted here is simply re-fetched — correctly parsed —
+    on the next search. New junk is now rejected at parse time."""
+    conn.execute(
+        """DELETE FROM foods
+           WHERE source = 'off'
+             AND COALESCE(json_extract(nutrients_json, '$.calories'), 0)  = 0
+             AND COALESCE(json_extract(nutrients_json, '$.protein_g'), 0) = 0
+             AND COALESCE(json_extract(nutrients_json, '$.carbs_g'), 0)   = 0
+             AND COALESCE(json_extract(nutrients_json, '$.fat_g'), 0)     = 0
+             AND id NOT IN (SELECT DISTINCT food_id FROM log_entries)
+             AND id NOT IN (SELECT DISTINCT food_id FROM favorites)"""
+    )
 
 
 def _repair_nutrients(conn) -> None:

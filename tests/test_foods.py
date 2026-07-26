@@ -261,3 +261,46 @@ def test_external_search_has_local_shape(client, monkeypatch):
     log = client.post("/api/log/", json={"food_id": food["id"], "quantity_g": 200.0})
     assert log.status_code == 200
     assert log.json()["calories"] == 100.0
+
+
+# ── Zero-calorie foods vs rows with no data at all ───────────────────────────
+# Open Food Facts contains non-food submissions (a 9V battery reached our cache).
+# Filtering "0 calories" would have thrown away Coke Zero, sparkling water and
+# black coffee — the test is whether nutrition was MEASURED, not whether it's 0.
+
+def test_genuine_zero_calorie_products_are_kept():
+    from app.services.food_lookup import _parse_off
+    coke_zero = {
+        "product_name": "Coca-Cola Zero",
+        "brands": "Coca-Cola",
+        "nutriments": {"energy-kcal_100g": 0.2, "proteins_100g": 0,
+                       "carbohydrates_100g": 0, "fat_100g": 0},
+    }
+    parsed = _parse_off(coke_zero)
+    assert parsed is not None
+    import json as _json
+    assert _json.loads(parsed["nutrients_json"])["calories"] == 0.2
+
+
+def test_explicit_all_zero_food_is_kept():
+    """Water and unsweetened tea are genuinely 0 across the board."""
+    from app.services.food_lookup import _parse_off
+    water = {"product_name": "Sparkling Water", "brands": "x",
+             "nutriments": {"energy-kcal_100g": 0, "proteins_100g": 0,
+                            "carbohydrates_100g": 0, "fat_100g": 0}}
+    assert _parse_off(water) is not None
+
+
+def test_rows_with_no_nutrition_data_are_rejected():
+    """The battery: nutrient fields absent entirely, not zero."""
+    from app.services.food_lookup import _parse_off
+    battery = {"product_name": "Pila 9V", "brands": "Kodak", "nutriments": {}}
+    assert _parse_off(battery) is None
+    assert _parse_off({"product_name": "Kodak", "brands": "Kodak"}) is None
+
+
+def test_partial_nutrition_still_counts_as_data():
+    from app.services.food_lookup import _parse_off
+    only_energy = {"product_name": "Mystery Drink", "brands": "x",
+                   "nutriments": {"energy-kcal_100g": 12}}
+    assert _parse_off(only_energy) is not None

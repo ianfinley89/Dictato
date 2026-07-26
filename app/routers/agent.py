@@ -246,6 +246,50 @@ async def agent_log(
             **({"weight": weighed["display"]} if weighed else {})}
 
 
+@router.delete("/capture/{capture_id}")
+async def discard_capture(capture_id: int, request: Request):
+    """Throw away an entire capture — every entry it logged, in one action.
+
+    Undo is per entry, so a five-item meal that came out wrong took five taps and
+    there was no way to abandon a capture outright. The capture_log row is kept
+    (with its entries marked discarded) because a rejected capture is exactly the
+    signal the training dataset wants."""
+    uid = get_current_user_id(request)
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT user_id, entries_json FROM capture_log WHERE id=?", (capture_id,)
+        ).fetchone()
+        if not row:
+            raise HTTPException(404, "Capture not found")
+        if row["user_id"] != uid:
+            raise HTTPException(403, "Forbidden")
+        try:
+            ids = [e["id"] for e in json.loads(row["entries_json"] or "[]") if e.get("id")]
+        except json.JSONDecodeError:
+            ids = []
+        removed = 0
+        if ids:
+            marks = ",".join("?" * len(ids))
+            cur = conn.execute(
+                f"DELETE FROM log_entries WHERE user_id=? AND id IN ({marks})",
+                (uid, *ids))
+            removed = cur.rowcount
+        # Tag rather than rewrite: the transcript and the model's output stay
+        # intact for the dataset, and "the user threw this away" joins the same
+        # correction taxonomy as portion/wrong-item fixes.
+        tags = conn.execute("SELECT tags_json FROM capture_log WHERE id=?",
+                            (capture_id,)).fetchone()["tags_json"]
+        try:
+            tag_list = json.loads(tags or "[]")
+        except json.JSONDecodeError:
+            tag_list = []
+        if "correction:discarded" not in tag_list:
+            tag_list.append("correction:discarded")
+        conn.execute("UPDATE capture_log SET tags_json=? WHERE id=?",
+                     (json.dumps(tag_list), capture_id))
+    return {"ok": True, "removed": removed}
+
+
 @router.get("/usage")
 async def usage(request: Request):
     uid = get_current_user_id(request)

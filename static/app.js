@@ -403,6 +403,8 @@ function showResultCard(result, photoUrl = '') {
   renderResultAnnotation(result.annotation || {}, !!photoUrl);
   renderResultEntries(result.entries || []);
   renderClarify(result, !!photoUrl);
+  $('result-discard-row').classList.toggle('hidden',
+    !result.capture_id || !(result.entries || []).length);
   // Follow-ups refine THIS capture ("say more" after a photo, photo after voice).
   $('result-followup').classList.toggle('hidden', !result.capture_id);
   $('result-card').classList.remove('hidden');
@@ -511,6 +513,7 @@ function renderResultEntries(entries) {
         <div class="result-entry-meta">${Math.round(e.quantity_g)}g${equiv ? ` (${esc(equiv)})` : ''} · ${e.calories.toFixed(0)} cal · ${icon('db')} ${esc(e.food_source || '')}${pflag}</div>
       </div>
       <button class="result-portion link-btn" data-id="${e.id}">Portion</button>
+      ${AI_MADE.includes(e.food_source_raw) ? `<button class="result-fixfood link-btn" data-food="${e.food_id}" data-id="${e.id}">Fix name</button>` : ''}
       <button class="result-adjust link-btn" data-id="${e.id}" data-food="${e.food_id}" data-qty="${e.quantity_g}">Adjust</button>
       <button class="result-undo link-btn" data-id="${e.id}">Undo</button>
       <div class="portion-picker hidden" data-for="${e.id}"></div>
@@ -519,6 +522,9 @@ function renderResultEntries(entries) {
 
   wrap.querySelectorAll('.result-portion').forEach(btn => {
     btn.addEventListener('click', () => togglePortionPicker(btn.dataset.id));
+  });
+  wrap.querySelectorAll('.result-fixfood').forEach(btn => {
+    btn.addEventListener('click', () => openFoodEdit(btn.dataset.food, btn.dataset.id));
   });
   // Warm the options while the user reads the card, so the tap is instant.
   entries.forEach(e => portionOptions(e.id));
@@ -591,6 +597,68 @@ async function refreshResultEntries() {
     renderResultEntries(fresh);
   }
 }
+
+$('result-discard').addEventListener('click', async () => {
+  if (!_lastResult || !_lastResult.capture_id) return;
+  const n = (_lastResult.entries || []).length;
+  if (!confirm(`Discard this capture and remove ${n} logged item${n === 1 ? '' : 's'}?`)) return;
+  try {
+    await api.del(`/api/agent/capture/${_lastResult.capture_id}`);
+    $('result-card').classList.add('hidden');
+    await goToToday();
+    showToast('Capture discarded');
+  } catch (err) { showToast(err.message, 'error'); }
+});
+
+// ── Fix a food the AI created (wrong name from a misheard word, bad numbers) ──
+// Only AI-made rows are editable; USDA/OFF/FatSecret are shared reference data.
+const AI_MADE = ['web', 'estimate', 'user'];
+const EDITABLE_SOURCES = AI_MADE;
+
+function openFoodEdit(foodId, entryId) {
+  api.get(`/api/foods/${foodId}`).then(food => {
+    if (!EDITABLE_SOURCES.includes(food.source)) {
+      showToast(`${food.source.toUpperCase()} foods are shared data — use Adjust instead`, 'error');
+      return;
+    }
+    const n = food.nutrients_per_100g || {};
+    $('fe-name').value = food.name || '';
+    $('fe-brand').value = food.brand || '';
+    $('fe-cal').value = Math.round(n.calories || 0);
+    $('fe-protein').value = Math.round(n.protein_g || 0);
+    $('fe-carbs').value = Math.round(n.carbs_g || 0);
+    $('fe-fat').value = Math.round(n.fat_g || 0);
+    $('food-edit-overlay').dataset.foodId = foodId;
+    $('food-edit-overlay').dataset.entryId = entryId || '';
+    $('food-edit-overlay').classList.remove('hidden');
+    $('fe-name').focus();
+  }).catch(err => showToast(err.message, 'error'));
+}
+
+$('fe-cancel').addEventListener('click', () => $('food-edit-overlay').classList.add('hidden'));
+$('fe-close').addEventListener('click', () => $('food-edit-overlay').classList.add('hidden'));
+
+$('food-edit-form').addEventListener('submit', async e => {
+  e.preventDefault();
+  const el = $('food-edit-overlay');
+  try {
+    await api.put(`/api/foods/${el.dataset.foodId}`, {
+      name: $('fe-name').value.trim(),
+      brand: $('fe-brand').value.trim(),
+      values_per: '100g',
+      calories: parseFloat($('fe-cal').value) || 0,
+      protein_g: parseFloat($('fe-protein').value) || 0,
+      carbs_g: parseFloat($('fe-carbs').value) || 0,
+      fat_g: parseFloat($('fe-fat').value) || 0,
+      // Also refresh the entry that prompted the fix, so this log is right too.
+      resync_entry_id: el.dataset.entryId ? parseInt(el.dataset.entryId, 10) : null,
+    });
+    el.classList.add('hidden');
+    showToast('Food updated');
+    await goToToday();
+    if (_lastResult && _lastResult.capture_id) await refreshResultEntries();
+  } catch (err) { showToast(err.message, 'error'); }
+});
 
 $('result-close').addEventListener('click', () => $('result-card').classList.add('hidden'));
 

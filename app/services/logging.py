@@ -148,6 +148,29 @@ def update_entry_quantity(user_id: int, entry_id: int, quantity_g: float,
             **snapshot}
 
 
+def resync_entry_snapshot(user_id: int, entry_id: int) -> dict | None:
+    """Recompute one entry's nutrition from the food's CURRENT values, keeping
+    its quantity. Snapshots normally freeze at log time so history can't shift
+    under the user — but when they have just corrected the food itself (a
+    misheard brand, numbers off the package), the entry that prompted the fix
+    should reflect it. Deliberately does NOT set portion_manual: the user edited
+    the FOOD, they did not vouch for the portion."""
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT user_id, food_id, quantity_g FROM log_entries WHERE id=?",
+            (entry_id,)).fetchone()
+    if not row or row["user_id"] != user_id:
+        return None
+    food = get_food_by_id(row["food_id"])
+    if not food:
+        return None
+    snapshot = _snapshot(food["nutrients_per_100g"], row["quantity_g"])
+    with get_conn() as conn:
+        conn.execute("UPDATE log_entries SET nutrients_snapshot_json=? WHERE id=?",
+                     (json.dumps(snapshot), entry_id))
+    return {"id": entry_id, "quantity_g": row["quantity_g"], **snapshot}
+
+
 def remove_entry(user_id: int, entry_id: int) -> None:
     with get_conn() as conn:
         row = conn.execute("SELECT user_id FROM log_entries WHERE id=?", (entry_id,)).fetchone()

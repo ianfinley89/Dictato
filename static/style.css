@@ -1085,6 +1085,14 @@ button:focus-visible, input:focus-visible, .chip:focus-visible {
   font-style: italic;
 }
 
+#result-discard-row {
+  margin-top: 10px;
+  text-align: right;
+}
+
+.danger-link { color: var(--danger, #ff6b6b); opacity: 0.85; }
+.danger-link:hover { opacity: 1; }
+
 #result-clarify {
   border: 1px solid var(--border);
   border-left: 3px solid var(--accent);
@@ -1447,7 +1455,8 @@ button:focus-visible, input:focus-visible, .chip:focus-visible {
 
 /* ═══ Create-food & report-issue modals ═══ */
 #create-overlay,
-#issue-overlay {
+#issue-overlay,
+#food-edit-overlay {
   position: fixed;
   inset: 0;
   z-index: 850;
