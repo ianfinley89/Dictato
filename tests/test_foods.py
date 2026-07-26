@@ -304,3 +304,52 @@ def test_partial_nutrition_still_counts_as_data():
     only_energy = {"product_name": "Mystery Drink", "brands": "x",
                    "nutriments": {"energy-kcal_100g": 12}}
     assert _parse_off(only_energy) is not None
+
+
+# ── Search routing: a source returning rows != a source finding the food ─────
+# Real failure: searching "Kodiak protein pancakes" returned Chinese Pancake,
+# Pancake Syrup and Pancakes Chocolate. USDA matched "pancakes", ignored
+# "kodiak", and because its list was non-empty the loop stopped — so FatSecret,
+# which holds the real Kodiak Cakes products, was never queried.
+
+def test_coverage_measures_the_whole_query_not_each_result():
+    from app.services.food_lookup import relevance_score
+    generic = [{"name": "Pancakes, Nfs"}, {"name": "Pancake Syrup"}]
+    assert relevance_score(generic, "kodiak protein pancakes") == pytest.approx(0.5)
+    both = [{"name": "Power Cakes pancakes", "brand": "Kodiak Cakes"}]
+    assert relevance_score(both, "kodiak protein pancakes") == pytest.approx(1.0)
+
+
+def test_common_food_words_do_not_prove_relevance():
+    """"protein" is too common to identify anything, so it isn't a query token."""
+    from app.services.food_lookup import _query_tokens
+    assert _query_tokens("Kodiak protein pancakes") == ["kodiak", "pancakes"]
+    assert _query_tokens("the fresh raw whole food") == []
+
+
+def test_brand_match_breaks_the_tie():
+    """USDA covers 'pancakes', FatSecret covers 'kodiak' — both 0.5. The brand is
+    what the user actually named, so it decides."""
+    from app.services.food_lookup import source_score
+    usda = [{"name": "Pancakes, Nfs", "brand": None}]
+    fatsecret = [{"name": "Protein Oats", "brand": "Kodiak Cakes"}]
+    assert source_score(fatsecret, "kodiak protein pancakes") > \
+           source_score(usda, "kodiak protein pancakes")
+
+
+def test_empty_results_score_zero_and_never_win():
+    from app.services.food_lookup import source_score
+    assert source_score([], "anything") == (0.0, 0.0)
+
+
+def test_ranking_puts_fuller_matches_first():
+    from app.services.food_lookup import _rank_by_relevance
+    foods = [{"name": "Pancake Syrup", "brand": None},
+             {"name": "Power Cakes pancakes", "brand": "Kodiak Cakes"}]
+    assert _rank_by_relevance(foods, "kodiak pancakes")[0]["brand"] == "Kodiak Cakes"
+
+
+def test_a_query_with_no_distinctive_words_is_always_satisfied():
+    """Prevents an endless fan-out on a query made only of filler."""
+    from app.services.food_lookup import relevance_score
+    assert relevance_score([{"name": "anything"}], "the raw whole") == 1.0

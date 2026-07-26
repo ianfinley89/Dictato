@@ -51,12 +51,28 @@ async def search_foods(query: str, user_id: int, limit: int = 10, brand: str | N
     if local and (has_user_food or _has_strong_local(local, q)):
         results = local
     else:
-        results = local  # fallback if every source is empty
-        # FatSecret runs last — a fallback before the AI pass.
+        # Try each source in order, but keep going while the results don't
+        # actually match what was asked for. Stopping at the first NON-EMPTY
+        # source made OFF and FatSecret unreachable from manual search: USDA
+        # answers nearly anything with something, so "Kodiak protein pancakes"
+        # returned Chinese Pancake and the real Kodiak products (in FatSecret)
+        # were never queried. The extra calls only happen when the earlier
+        # source missed, so the USDA hourly cap is not burned on easy lookups.
+        results = local          # only survives if every source comes back empty
+        # Start below zero so the FIRST source that returns anything wins ties
+        # (preserving the old ordering), while a later source still takes over
+        # when it genuinely covers more of the query. Seeding this from the weak
+        # local cache would let stale rows block a proper lookup.
+        best = (-1.0, -1.0)
         for fetch in (_search_usda, _search_off, search_fatsecret):
             items = await fetch(query, limit)
-            if items:
-                results = _cache_all(items)
+            if not items:
+                continue
+            cached = _cache_all(items)
+            score = source_score(cached, q)
+            if score > best:
+                results, best = cached, score
+            if best[0] >= _GOOD_ENOUGH:
                 break
 
     # Brand fallback: if a brand was named but no result matches it, try FatSecret
@@ -66,7 +82,9 @@ async def search_foods(query: str, user_id: int, limit: int = 10, brand: str | N
         matches = [f for f in fs if _has_brand([f], brand)]
         if matches:
             results = matches + [f for f in results if f["id"] not in {m["id"] for m in matches}]
-    return results
+    # Surface the closest matches first — a source can return the right product
+    # buried under near-misses.
+    return _rank_by_relevance(results, q)[:limit]
 
 
 def _is_user_food(food: dict, user_id: int) -> bool:
@@ -122,6 +140,83 @@ def _has_strong_local(foods: list[dict], q: str) -> bool:
     """True if a cached food's lead noun matches the query — i.e. the cache really
     has *this* food, not just something containing the word."""
     return any(_noun_match(_lead_noun(f["name"]), q) for f in foods)
+
+
+# Words too common in food names to prove a result is relevant. "Kodiak protein
+# pancakes" must be judged on "kodiak", not on "pancakes" — USDA answered that
+# query with "Chinese Pancake" and we accepted it because the list wasn't empty.
+_WEAK_TOKENS = {
+    "the", "and", "with", "of", "a", "an", "in", "or", "no", "raw", "cooked",
+    "fresh", "frozen", "plain", "original", "classic", "natural", "style",
+    "mix", "flavor", "flavour", "protein", "light", "low", "free", "whole",
+    "food", "foods", "brand", "made", "from", "large", "small", "medium",
+}
+_MIN_TOKEN_LEN = 3
+# Stop querying further sources once this share of the query's words is covered.
+# 1.0 = every distinctive word found; anything less means something was missed.
+_GOOD_ENOUGH = 1.0
+
+
+def _query_tokens(q: str) -> list[str]:
+    """The words that actually identify what was asked for."""
+    words = re.findall(r"[a-z0-9]+", (q or "").lower())
+    return [w for w in words if len(w) >= _MIN_TOKEN_LEN and w not in _WEAK_TOKENS]
+
+
+def _covers(hay: str, token: str) -> bool:
+    return token in hay or (token.endswith("s") and token[:-1] in hay)
+
+
+def _brand_coverage(foods: list[dict], tokens: list[str]) -> float:
+    """How much of the query is matched by a result's BRAND.
+
+    Breaks the tie that kept the wrong source: for "Kodiak protein pancakes",
+    USDA covers "pancakes" (generic dessert rows) and FatSecret covers "kodiak"
+    (brand "Kodiak Cakes") — both 0.5. The brand is what the user actually named,
+    so brand coverage decides."""
+    if not tokens or not foods:
+        return 0.0
+    hay = " ".join(f.get("brand") or "" for f in foods).lower()
+    return sum(1 for t in tokens if _covers(hay, t)) / len(tokens)
+
+
+def source_score(foods: list[dict], query: str) -> tuple:
+    """(token coverage, brand coverage) — compared lexicographically."""
+    tokens = _query_tokens(query)
+    return (relevance_score(foods, query), _brand_coverage(foods, tokens))
+
+
+def relevance_score(foods: list[dict], query: str) -> float:
+    """Fraction of the QUERY'S words that appear somewhere in the results.
+
+    Deliberately measured across the result SET, not per result. Searching
+    "Kodiak protein pancakes" returned four generic USDA pancakes: judged per
+    result they all look relevant (they do say "pancake"), but the word that
+    identifies the product — "kodiak" — appears nowhere, and that is the signal
+    that this source did not find it. Stopping at the first NON-EMPTY source is
+    what made Open Food Facts and FatSecret unreachable, and FatSecret held the
+    real Kodiak products."""
+    if not foods:
+        return 0.0
+    tokens = _query_tokens(query)
+    if not tokens:
+        return 1.0
+    hay = " ".join(f"{f.get('name') or ''} {f.get('brand') or ''}" for f in foods).lower()
+    return sum(1 for t in tokens if _covers(hay, t)) / len(tokens)
+
+
+def _rank_by_relevance(foods: list[dict], query: str) -> list[dict]:
+    """Stable sort putting results that match more of the query first."""
+    tokens = _query_tokens(query)
+    if not tokens:
+        return foods
+
+    def score(f: dict) -> tuple:
+        hay = f"{f.get('name') or ''} {f.get('brand') or ''}".lower()
+        hits = sum(1 for t in tokens if t in hay)
+        return (-hits, len(f.get("name") or ""))
+
+    return sorted(foods, key=score)
 
 
 def _generic_rank(item: dict) -> tuple:
