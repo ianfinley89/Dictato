@@ -91,25 +91,61 @@ def _is_user_food(food: dict, user_id: int) -> bool:
     return food.get("source") in _USER_SOURCES and food.get("created_by_user_id") == user_id
 
 
+_SCOPE_SQL = """
+    AND (source NOT IN ('user', 'recipe', 'estimate') OR created_by_user_id = ?)
+    AND (expires_at IS NULL OR datetime(expires_at) > datetime('now'))
+"""
+
+
+def _fts_query(query: str) -> str | None:
+    """Turn a search phrase into an FTS5 MATCH expression.
+
+    Words are OR'd and each is a prefix term, so "kodiak protein pancake" also
+    finds "Kodiak Cakes … pancakes". bm25 then ranks rows matching more words
+    higher, which is what `LIKE %whole phrase%` could never do."""
+    words = re.findall(r"[a-z0-9]+", (query or "").lower())
+    terms = [f'"{w}"*' for w in words if len(w) > 1]
+    return " OR ".join(terms) if terms else None
+
+
 def _search_local(query: str, user_id: int, limit: int) -> list[dict]:
     """Public foods (USDA/OFF cache) plus *this* user's own foods. Another user's
     recipes/custom foods are never returned. The user's foods sort first."""
     q = query.strip().lower()
+    match = _fts_query(q)
     with get_conn() as conn:
-        rows = conn.execute(
-            """SELECT * FROM foods
-               WHERE name LIKE ?
-                 AND (source NOT IN ('user', 'recipe', 'estimate') OR created_by_user_id = ?)
-                 AND (expires_at IS NULL OR datetime(expires_at) > datetime('now'))  -- skip expired licensed cache
-               ORDER BY
-                 CASE WHEN created_by_user_id = ? THEN 0 ELSE 1 END,   -- your foods first
-                 CASE WHEN lower(name) = ?        THEN 0
-                      WHEN lower(name) LIKE ?     THEN 1
-                      ELSE 2 END,
-                 length(name)
-               LIMIT ?""",
-            (f"%{query}%", user_id, user_id, q, f"{q}%", limit),
-        ).fetchall()
+        rows = []
+        if match:
+            try:
+                rows = conn.execute(
+                    f"""SELECT f.* FROM foods_fts
+                        JOIN foods f ON f.id = foods_fts.rowid
+                        WHERE foods_fts MATCH ? {_SCOPE_SQL}
+                        ORDER BY
+                          CASE WHEN f.created_by_user_id = ? THEN 0 ELSE 1 END,
+                          CASE WHEN lower(f.name) = ? THEN 0
+                               WHEN lower(f.name) LIKE ? THEN 1
+                               ELSE 2 END,
+                          bm25(foods_fts, 10.0, 5.0),
+                          length(f.name)
+                        LIMIT ?""",
+                    (match, user_id, user_id, q, f"{q}%", limit),
+                ).fetchall()
+            except Exception:
+                rows = []      # index missing/corrupt — fall back to LIKE below
+        if not rows:
+            rows = conn.execute(
+                f"""SELECT * FROM foods
+                    WHERE name LIKE ? {_SCOPE_SQL}
+                    ORDER BY
+                      CASE WHEN created_by_user_id = ? THEN 0 ELSE 1 END,
+                      CASE WHEN lower(name) = ?    THEN 0
+                           WHEN lower(name) LIKE ? THEN 1
+                           ELSE 2 END,
+                      length(name)
+                    LIMIT ?""",
+                (f"%{query}%", user_id, user_id, q, f"{q}%", limit),
+            ).fetchall()
     return [_row_to_food(r) for r in rows]
 
 

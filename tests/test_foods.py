@@ -5,15 +5,16 @@ from app.database import get_conn
 REG = {"email": "bob@example.com", "password": "password123", "display_name": "Bob"}
 
 
-def _seed_food(name: str = "Test Rice Cake", calories: float = 390.0) -> int:
+def _seed_food(name: str = "Test Rice Cake", calories: float = 390.0,
+               brand: str | None = None) -> int:
     nutrients = {
         "calories": calories, "protein_g": 8.0, "carbs_g": 80.0, "fat_g": 2.0,
         "fiber_g": 1.0, "micros": {},
     }
     with get_conn() as conn:
         cur = conn.execute(
-            "INSERT INTO foods (source, source_id, name, nutrients_json) VALUES (?,?,?,?)",
-            ("manual", None, name, json.dumps(nutrients)),
+            "INSERT INTO foods (source, source_id, name, brand, nutrients_json) VALUES (?,?,?,?,?)",
+            ("manual", None, name, brand, json.dumps(nutrients)),
         )
         return cur.lastrowid
 
@@ -353,3 +354,48 @@ def test_a_query_with_no_distinctive_words_is_always_satisfied():
     """Prevents an endless fan-out on a query made only of filler."""
     from app.services.food_lookup import relevance_score
     assert relevance_score([{"name": "anything"}], "the raw whole") == 1.0
+
+
+# ── Full-text local search ───────────────────────────────────────────────────
+# `LIKE %whole query%` cannot match a multi-word search: "oberto beef jerky"
+# found nothing locally even though "Beef Jerky" by Oberto was cached, so every
+# such search paid for an external lookup.
+
+def test_multi_word_search_matches_cached_food(client):
+    from app.services.food_lookup import _search_local
+    client.post("/api/auth/register", json=REG)
+    _seed_food("Beef Jerky", brand="Oberto Sausage Company")
+    hits = _search_local("oberto beef jerky", 1, 5)
+    assert any("jerky" in h["name"].lower() for h in hits)
+
+
+def test_word_order_does_not_matter(client):
+    from app.services.food_lookup import _search_local
+    client.post("/api/auth/register", json=REG)
+    _seed_food("Vietnamese Chicken Glass Noodle Soup")
+    assert _search_local("chicken soup vietnamese", 1, 5)
+
+
+def test_index_follows_renames_and_deletes(client):
+    """The triggers must keep the index in step, or a corrected food stays
+    findable only under its old name."""
+    from app.database import get_conn
+    from app.services.food_lookup import _search_local
+    client.post("/api/auth/register", json=REG)
+    fid = _seed_food("kodak protein pancakes")
+    assert _search_local("kodak", 1, 5)
+    with get_conn() as conn:
+        conn.execute("UPDATE foods SET name='kodiak protein pancakes' WHERE id=?", (fid,))
+    assert _search_local("kodiak", 1, 5)
+    with get_conn() as conn:
+        conn.execute("DELETE FROM foods WHERE id=?", (fid,))
+    assert not _search_local("kodiak", 1, 5)
+
+
+def test_search_survives_a_missing_index(client, monkeypatch):
+    """If the index is unavailable the LIKE path must still answer."""
+    from app.services import food_lookup
+    client.post("/api/auth/register", json=REG)
+    _seed_food("Plain Rice Cake")
+    monkeypatch.setattr(food_lookup, "_fts_query", lambda q: None)
+    assert food_lookup._search_local("Plain Rice Cake", 1, 5)

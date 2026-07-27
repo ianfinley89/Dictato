@@ -221,6 +221,34 @@ CREATE TABLE IF NOT EXISTS app_errors (
     error TEXT
 );
 
+-- Full-text index over food names/brands. `LIKE %whole query%` cannot match a
+-- multi-word search: "kodiak protein pancakes" found nothing even though
+-- "Kodiak Cakes, …" rows were sitting in the cache. FTS5 tokenises, so any word
+-- can match, and bm25 ranks the closest. External-content table (no duplicated
+-- text); the triggers below keep it in step with `foods`.
+-- A plain (not external-content) FTS5 table: it keeps its own copy of the text,
+-- which for ~1k short names is nothing, and in exchange `DELETE ... WHERE rowid`
+-- is safe even for a row that was never indexed. An external-content table needs
+-- its 'delete' command to match the indexed values exactly, and the migration
+-- purges below delete rows before any backfill could run — which left the index
+-- silently empty.
+CREATE VIRTUAL TABLE IF NOT EXISTS foods_fts USING fts5(
+    name, brand, tokenize='unicode61'
+);
+
+CREATE TRIGGER IF NOT EXISTS foods_fts_insert AFTER INSERT ON foods BEGIN
+    INSERT INTO foods_fts(rowid, name, brand) VALUES (new.id, new.name, new.brand);
+END;
+
+CREATE TRIGGER IF NOT EXISTS foods_fts_delete AFTER DELETE ON foods BEGIN
+    DELETE FROM foods_fts WHERE rowid = old.id;
+END;
+
+CREATE TRIGGER IF NOT EXISTS foods_fts_update AFTER UPDATE ON foods BEGIN
+    DELETE FROM foods_fts WHERE rowid = old.id;
+    INSERT INTO foods_fts(rowid, name, brand) VALUES (new.id, new.name, new.brand);
+END;
+
 CREATE INDEX IF NOT EXISTS idx_log_user_eaten ON log_entries(user_id, eaten_at);
 -- Personal portion priors look up one user's history for one food on every
 -- estimate-basis log.
@@ -280,6 +308,7 @@ def _migrate(conn) -> None:
     _repair_nutrients(conn)
     _purge_nonfood_rows(conn)
     _purge_impossible_macros(conn)
+    _backfill_fts(conn)
 
     log_cols = {r["name"] for r in conn.execute("PRAGMA table_info(log_entries)")}
     for col in ("portion_basis", "portion_confidence"):
@@ -312,6 +341,20 @@ def _migrate(conn) -> None:
         conn.execute("ALTER TABLE issue_reports ADD COLUMN category TEXT")
     if "capture_id" not in iss_cols:
         conn.execute("ALTER TABLE issue_reports ADD COLUMN capture_id INTEGER")
+
+
+def _backfill_fts(conn) -> None:
+    """Populate the full-text index for foods cached before it existed, and repair
+    it if it ever drifts (the triggers keep it current from here)."""
+    try:
+        indexed = conn.execute("SELECT COUNT(*) c FROM foods_fts").fetchone()["c"]
+        total = conn.execute("SELECT COUNT(*) c FROM foods").fetchone()["c"]
+        if indexed < total:
+            conn.execute("DELETE FROM foods_fts")
+            conn.execute(
+                "INSERT INTO foods_fts(rowid, name, brand) SELECT id, name, brand FROM foods")
+    except Exception:
+        pass          # search falls back to LIKE if the index is unavailable
 
 
 def _purge_impossible_macros(conn) -> None:
