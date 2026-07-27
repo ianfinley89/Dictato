@@ -1085,6 +1085,18 @@ button:focus-visible, input:focus-visible, .chip:focus-visible {
   font-style: italic;
 }
 
+.nutrition-warn {
+  flex-basis: 100%;
+  margin-top: 6px;
+  padding: 7px 10px;
+  border-radius: 8px;
+  background: rgba(255,180,80,0.10);
+  border-left: 3px solid rgba(255,180,80,0.65);
+  color: var(--text-muted);
+  font-size: 0.78rem;
+  line-height: 1.35;
+}
+
 #result-discard-row {
   margin-top: 10px;
   text-align: right;

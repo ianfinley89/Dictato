@@ -517,6 +517,7 @@ function renderResultEntries(entries) {
       <button class="result-adjust link-btn" data-id="${e.id}" data-food="${e.food_id}" data-qty="${e.quantity_g}">Adjust</button>
       <button class="result-undo link-btn" data-id="${e.id}">Undo</button>
       <div class="portion-picker hidden" data-for="${e.id}"></div>
+      ${e.nutrition_warning ? `<div class="nutrition-warn">${esc(e.nutrition_warning)}</div>` : ''}
     </div>`;
   }).join('');
 

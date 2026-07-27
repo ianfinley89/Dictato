@@ -26,6 +26,7 @@ from app.services.nutrition_guard import sanitize_per_100g
 from app.services.portion import (resolve_grams, guard_grams, snap_estimate,
                                   verify_claims, apply_personal_prior)
 from app.services.portion_history import personal_prior
+from app.services.plausibility import check_nutrition
 from app.services.profile import apply_profile_update
 from app.services.voice_parse import parse_local
 
@@ -323,7 +324,8 @@ def _real_brand(brand: str | None) -> str | None:
     return b
 
 
-async def _tool_create_food(user_id: int, inp: dict) -> dict:
+async def _tool_create_food(user_id: int, inp: dict,
+                            warnings: dict | None = None) -> dict:
     name = (inp.get("name") or "").strip().lower()
     if not name:
         return {"error": "name is required"}
@@ -366,6 +368,15 @@ async def _tool_create_food(user_id: int, inp: dict) -> dict:
         "fat_g": _clamp(_num(inp.get("fat_g")) * factor, 0, 100),
         "fiber_g": _clamp(_num(inp.get("fiber_g")) * factor, 0, 80),
     })
+    # Sanity-check invented numbers against real foods of the same kind. When a
+    # unit mix-up is PROVABLE (reading them per-serving lands them in the normal
+    # range) refuse and say so — that is a mechanical error, not a judgement.
+    # Otherwise warn and let it through: a protein-fortified soup can legitimately
+    # sit high, and silently editing the user's numbers would be worse.
+    warning = check_nutrition(name, nutrients, serving_g)
+    if warning and warning["likely_per_serving"] and inp.get("values_per") != "serving":
+        return {"error": warning["message"]}
+
     with get_conn() as conn:
         cur = conn.execute(
             """INSERT INTO foods (source, source_id, name, brand, serving_desc, serving_g,
@@ -376,7 +387,12 @@ async def _tool_create_food(user_id: int, inp: dict) -> dict:
              json.dumps(nutrients), user_id),
         )
         food_id = cur.lastrowid
-    return {"food_id": food_id, "created": True, "source": source}
+    out = {"food_id": food_id, "created": True, "source": source}
+    if warning:
+        out["warning"] = warning["message"]
+        if warnings is not None:
+            warnings[food_id] = warning["message"]    # rides to the entry it lands on
+    return out
 
 
 async def _tool_log_food(user_id: int, inp: dict, method: str, note: str | None, logged: list) -> dict:
@@ -480,7 +496,8 @@ def _tool_remove_entry(user_id: int, inp: dict) -> dict:
 async def _execute_tool(name: str, inp: dict, user_id: int, method: str,
                         note: str | None, logged: list, annotation: dict,
                         existing_food_ids: dict | None = None,
-                        corrections: list | None = None) -> dict:
+                        corrections: list | None = None,
+                        nutrition_warnings: dict | None = None) -> dict:
     # In a follow-up ("that was wrong — it was a bottle, not a litre") the tools
     # the model reaches for ARE the correction taxonomy: what it changed says what
     # was wrong. Deterministic, no self-report, no extra tokens.
@@ -497,7 +514,7 @@ async def _execute_tool(name: str, inp: dict, user_id: int, method: str,
         foods = await search_foods(query, user_id, limit=6, brand=(inp.get("brand") or None))
         return {"candidates": _fmt_candidates(foods)} if foods else {"candidates": [], "note": "no matches — try a simpler name, or web_search/create_food"}
     if name == "create_food":
-        return await _tool_create_food(user_id, inp)
+        return await _tool_create_food(user_id, inp, nutrition_warnings)
     if name == "log_food":
         # Revision guard: the same food again means adjust, not duplicate.
         fid = inp.get("food_id")
@@ -508,6 +525,11 @@ async def _execute_tool(name: str, inp: dict, user_id: int, method: str,
         out = await _tool_log_food(user_id, inp, method, note, logged)
         if out.get("logged"):
             _corr("correction:missed-item")
+            # Carry any "this looks high for a soup" note onto the entry, so the
+            # user sees it where the number actually appears.
+            note_msg = (nutrition_warnings or {}).get(fid)
+            if note_msg and logged:
+                logged[-1]["nutrition_warning"] = note_msg
         return out
     if name == "annotate_capture":
         return _tool_annotate(user_id, inp, annotation)
@@ -573,6 +595,7 @@ async def run_agent(user_id: int, *, text: str | None = None,
     logged: list[dict] = []
     annotation: dict = {}
     corrections: list[str] = []
+    nutrition_warnings: dict[int, str] = {}
     summary = ""
 
     # Route photo captures to the vision model, voice/text to the text model.
@@ -602,7 +625,7 @@ async def run_agent(user_id: int, *, text: str | None = None,
         for tc in resp.tool_calls:
             out = await _execute_tool(tc.name, tc.input, user_id, method, note,
                                       logged, annotation, existing_food_ids,
-                                      corrections)
+                                      corrections, nutrition_warnings)
             results.append({"id": tc.id, "name": tc.name, "content": json.dumps(out)})
         if not results:
             break
