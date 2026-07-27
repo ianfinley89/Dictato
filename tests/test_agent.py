@@ -928,3 +928,40 @@ def test_export_dataset_includes_audio_and_issue_reports(client, monkeypatch, tm
     with get_conn() as conn:
         n = conn.execute("SELECT COUNT(*) c FROM log_entries WHERE user_id=?", (uid,)).fetchone()["c"]
     assert n == 2   # the _log_once seed + the capture's entry — no third (duplicate) row
+
+
+def test_same_food_cannot_be_logged_twice_in_one_capture(client, monkeypatch):
+    """One order of meat lover's pizza came back as THREE pizza entries totalling
+    3063 calories (513% error) because the model lost track of what it had
+    logged. Haiku does it too — a breakfast logged white rice twice at 110g."""
+    from app.routers import agent as agent_router
+    monkeypatch.setattr(agent_router, "ANTHROPIC_API_KEY", "test-key")
+    _register(client)
+    _seed_food(name="meat lovers pizza", serving_g=127.0)
+    _script_llm(monkeypatch, [
+        _tool("log_food", {"food_id": 1, "basis": "estimate", "quantity_g": 127}, "t1"),
+        _tool("log_food", {"food_id": 1, "basis": "estimate", "quantity_g": 254}, "t2"),
+        _tool("log_food", {"food_id": 1, "basis": "estimate", "quantity_g": 254}, "t3"),
+        _text("Logged the pizza."),
+    ])
+    r = client.post("/api/agent/log", data={"text": "a meat lover's pizza"})
+    assert r.status_code == 200
+    entries = r.json()["entries"]
+    assert len(entries) == 1                      # not three
+    assert entries[0]["quantity_g"] == pytest.approx(127.0)
+
+
+def test_different_foods_still_log_normally(client, monkeypatch):
+    """The guard must not block a real multi-item meal."""
+    from app.routers import agent as agent_router
+    monkeypatch.setattr(agent_router, "ANTHROPIC_API_KEY", "test-key")
+    _register(client)
+    _seed_food(name="rice cake", serving_g=9.0)
+    _seed_food(name="banana", serving_g=118.0)
+    _script_llm(monkeypatch, [
+        _tool("log_food", {"food_id": 1, "basis": "count", "servings": 2, "quantity_g": 18}, "t1"),
+        _tool("log_food", {"food_id": 2, "basis": "count", "servings": 1, "quantity_g": 118}, "t2"),
+        _text("Logged both."),
+    ])
+    r = client.post("/api/agent/log", data={"text": "two rice cakes and a banana"})
+    assert len(r.json()["entries"]) == 2

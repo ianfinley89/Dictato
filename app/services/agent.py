@@ -522,6 +522,22 @@ async def _execute_tool(name: str, inp: dict, user_id: int, method: str,
             return {"error": f"food_id {fid} is already logged as entry "
                              f"{existing_food_ids[fid]} — use update_entry with the "
                              f"new TOTAL grams instead of logging it again"}
+        # Same guard WITHIN one capture. A model that loses track of what it has
+        # already logged silently multiplies the meal: one order of meat lover's
+        # pizza came back as three pizza entries totalling 3063 calories. Haiku
+        # does it too (a breakfast logged white rice twice at 110g). One food is
+        # one entry; more of it means a bigger quantity.
+        already = next((e for e in logged if e.get("food_id") == fid), None)
+        if already:
+            msg = (f"'{already.get('food_name')}' is already logged in this capture as "
+                   f"entry {already['id']} at {already.get('quantity_g')}g. One food is "
+                   f"one entry — do not log it again.")
+            if revising:      # update_entry is only offered in revision mode
+                total = round((already.get("quantity_g") or 0) + _num(inp.get("quantity_g")), 1)
+                msg += f" If they ate more, use update_entry with the new TOTAL (~{total}g)."
+            else:
+                msg += " If the portion was bigger, it should have been one larger amount."
+            return {"error": msg, "entry_id": already["id"]}
         out = await _tool_log_food(user_id, inp, method, note, logged)
         if out.get("logged"):
             _corr("correction:missed-item")
