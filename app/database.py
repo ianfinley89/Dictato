@@ -279,6 +279,7 @@ def _migrate(conn) -> None:
     _backfill_serving_g(conn)
     _repair_nutrients(conn)
     _purge_nonfood_rows(conn)
+    _purge_impossible_macros(conn)
 
     log_cols = {r["name"] for r in conn.execute("PRAGMA table_info(log_entries)")}
     for col in ("portion_basis", "portion_confidence"):
@@ -311,6 +312,26 @@ def _migrate(conn) -> None:
         conn.execute("ALTER TABLE issue_reports ADD COLUMN category TEXT")
     if "capture_id" not in iss_cols:
         conn.execute("ALTER TABLE issue_reports ADD COLUMN capture_id INTEGER")
+
+
+def _purge_impossible_macros(conn) -> None:
+    """Delete cached rows claiming more than 100 g of a macro per 100 g.
+
+    That is a mass impossibility, not a judgement call, and it holds whatever the
+    encoding: FatSecret rows store per-SERVING values, and no single serving of
+    real food contains 315 g of protein. Those rows came from community recipe
+    entries whose serving is the whole batch ("Per 5454g"), filed under a nominal
+    100 g — the parser now scales by the stated weight instead, so re-fetching
+    them yields correct values. Anything already logged is left alone so history
+    stays stable; the food row is refreshed on the next search."""
+    conn.execute(
+        """DELETE FROM foods
+           WHERE (COALESCE(json_extract(nutrients_json, '$.protein_g'), 0) > 100
+               OR COALESCE(json_extract(nutrients_json, '$.carbs_g'), 0)   > 100
+               OR COALESCE(json_extract(nutrients_json, '$.fat_g'), 0)     > 100)
+             AND id NOT IN (SELECT DISTINCT food_id FROM log_entries)
+             AND id NOT IN (SELECT DISTINCT food_id FROM favorites)"""
+    )
 
 
 def _purge_nonfood_rows(conn) -> None:

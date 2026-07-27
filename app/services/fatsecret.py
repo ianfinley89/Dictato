@@ -108,6 +108,23 @@ async def search_fatsecret(query: str, limit: int = 10) -> list[dict]:
         return []
 
 
+# A gram weight inside the serving text: "429g", "1 cup (240 g)", "100 g".
+_SERVING_G_RE = re.compile(r"(\d+(?:\.\d+)?)\s*g\b", re.IGNORECASE)
+_BARE_GRAMS_RE = re.compile(r"\d+(?:\.\d+)?\s*g", re.IGNORECASE)
+
+
+def _serving_grams(serving: str) -> float | None:
+    """Real weight of the stated serving, when FatSecret gives one."""
+    matches = _SERVING_G_RE.findall(serving or "")
+    if not matches:
+        return None
+    try:                       # a parenthesised weight wins: "1 cup (240 g)"
+        grams = float(matches[-1])
+    except ValueError:
+        return None
+    return grams if 0 < grams <= 20000 else None
+
+
 def _parse(item: dict, expires_at: str):
     m = _DESC_RE.search(item.get("food_description") or "")
     if not m:
@@ -121,17 +138,40 @@ def _parse(item: dict, expires_at: str):
         "fiber_g": 0.0,
         "micros": {},
     }
-    # food_description macros are per the stated serving. If it's "100 g", they're
-    # already per-100g; otherwise treat as one nominal serving (serving_g = 100),
-    # matching how custom foods store per-serving macros.
-    per_100g = bool(re.search(r"\b100\s*g\b", serving, re.IGNORECASE))
+    # The macros are per the STATED serving, and that serving is often given in
+    # grams — "Per 429g", and for community recipe entries "Per 5454g". Ignoring
+    # that weight and filing the numbers under a nominal 100 g produced
+    # physically impossible rows: Chicken Pho was stored as 315 g of protein per
+    # 100 g. Scaling by the real weight gives 5.8 g/100 g, which is simply
+    # correct. Only when no weight is stated do we fall back to the nominal
+    # serving used by custom foods.
+    grams = _serving_grams(serving)
+    if grams:
+        factor = 100.0 / grams
+        nutrients = {k: (round(v * factor, 2) if isinstance(v, (int, float)) else v)
+                     for k, v in nutrients.items()}
+        # A bare weight ("100g", "429g") is the basis the numbers are quoted
+        # against, not a portion someone eats — leave serving_g unset so nothing
+        # treats it as "one serving". A described portion ("1 cup (240 g)") is a
+        # real serving and worth keeping.
+        bare_basis = bool(_BARE_GRAMS_RE.fullmatch(serving.strip()))
+        return {
+            "source": "fatsecret",
+            "source_id": str(item.get("food_id") or ""),
+            "name": (item.get("food_name") or "").strip(),
+            "brand": (item.get("brand_name") or "").strip() or None,
+            "serving_desc": f"{grams:g} g" if bare_basis else serving,
+            "serving_g": None if bare_basis else round(grams, 1),
+            "nutrients_json": json.dumps(nutrients),   # now genuinely per 100 g
+            "expires_at": expires_at,
+        }
     return {
         "source": "fatsecret",
         "source_id": str(item.get("food_id") or ""),
         "name": (item.get("food_name") or "").strip(),
         "brand": (item.get("brand_name") or "").strip() or None,
-        "serving_desc": "100 g" if per_100g else serving,
-        "serving_g": None if per_100g else 100.0,
+        "serving_desc": serving,
+        "serving_g": 100.0,          # nominal: macros are per one serving
         "nutrients_json": json.dumps(nutrients),
         "expires_at": expires_at,
     }

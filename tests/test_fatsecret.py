@@ -53,7 +53,12 @@ def test_brand_fallback_uses_fatsecret(client, monkeypatch):
                  "brand": "Chipotle", "serving_desc": "1 burrito", "serving_g": 100.0,
                  "nutrients_json": json.dumps(n), "expires_at": "2099-01-01T00:00:00"}]
 
+    async def no_off(query, limit):
+        return []          # keep the test off the network: search now falls
+                           # through to OFF when USDA only partly matches
+
     monkeypatch.setattr(food_lookup, "_search_usda", fake_usda)
+    monkeypatch.setattr(food_lookup, "_search_off", no_off)
     monkeypatch.setattr(food_lookup, "search_fatsecret", fake_fatsecret)
     client.post("/api/auth/register", json=REG)
 
@@ -111,3 +116,38 @@ def test_expired_fatsecret_hidden_from_search(client, monkeypatch):
     _insert_fatsecret("Ghostfruit", past)   # unique name, expired
     # It must not surface in search (expired licensed cache)
     assert client.get("/api/foods/search?q=ghostfruit").json() == []
+
+
+def test_gram_serving_is_converted_to_real_per_100g():
+    """FatSecret quotes macros against the stated serving, and that serving is
+    often a weight — community recipe rows say "Per 5454g". Filing those numbers
+    under a nominal 100 g stored Chicken Pho as 315 g of protein per 100 g, which
+    is a mass impossibility, and it reached a user's log as 92 g of protein."""
+    from app.services.fatsecret import _parse
+    item = {"food_id": "9", "food_name": "Chicken Pho",
+            "food_description": "Per 5454g - Calories: 3632kcal | Fat: 125.63g "
+                                "| Carbs: 285.62g | Protein: 314.56g"}
+    n = json.loads(_parse(item, "2099-01-01T00:00:00")["nutrients_json"])
+    assert n["calories"] == pytest.approx(66.6, abs=0.2)
+    assert n["protein_g"] == pytest.approx(5.77, abs=0.05)
+
+
+def test_described_portion_keeps_its_real_weight():
+    from app.services.fatsecret import _parse
+    item = {"food_id": "10", "food_name": "Milk",
+            "food_description": "Per 1 cup (240 g) - Calories: 120kcal | Fat: 5.00g "
+                                "| Carbs: 12.00g | Protein: 8.00g"}
+    f = _parse(item, "2099-01-01T00:00:00")
+    assert f["serving_g"] == pytest.approx(240.0)
+    assert json.loads(f["nutrients_json"])["calories"] == pytest.approx(50.0)
+
+
+def test_bare_weight_is_a_basis_not_a_serving():
+    """"Per 429g" states what the numbers refer to; nobody eats "one 429 g"."""
+    from app.services.fatsecret import _parse
+    item = {"food_id": "11", "food_name": "Buckwheat Pancakes",
+            "food_description": "Per 429g - Calories: 763kcal | Fat: 27.00g "
+                                "| Carbs: 104.00g | Protein: 29.00g"}
+    f = _parse(item, "2099-01-01T00:00:00")
+    assert f["serving_g"] is None
+    assert json.loads(f["nutrients_json"])["protein_g"] == pytest.approx(6.76, abs=0.05)
