@@ -35,9 +35,31 @@ def _seed_food(name="rice cake", serving_g=9.0, cal=387.0):
         return cur.lastrowid
 
 
+def _knows_food(uid, food_id):
+    """Put a food in the user's favourites so its id is legitimately offered to
+    the model (see the offered-id guard). Unlike _log_once this creates no log
+    entry, so entry-count assertions stay clean."""
+    with get_conn() as conn:
+        conn.execute("INSERT OR IGNORE INTO favorites (user_id, food_id) VALUES (?,?)",
+                     (uid, food_id))
+
+
 def _log_once(uid, food_id):
     from app.services.logging import log_entry_for_user
     return log_entry_for_user(uid, food_id, 9.0, "manual")
+
+
+def _no_external(monkeypatch):
+    """Keep search_foods on the local cache. Without this a test search reaches
+    USDA/OFF/FatSecret over the network, caching real foods and shifting ids."""
+    from app.services import food_lookup
+
+    async def none(query, limit):
+        return []
+
+    monkeypatch.setattr(food_lookup, "_search_usda", none)
+    monkeypatch.setattr(food_lookup, "_search_off", none)
+    monkeypatch.setattr(food_lookup, "search_fatsecret", none)
 
 
 # ── Endpoint basics ───────────────────────────────────────────────────────────
@@ -396,6 +418,7 @@ def test_agent_loop_survives_api_error_after_partial_log(client, monkeypatch):
     monkeypatch.setattr(agent_router, "ANTHROPIC_API_KEY", "test-key")
     uid = _register(client)
     _seed_food()
+    _knows_food(uid, 1)          # id legitimately offered to the model
 
     calls = {"n": 0}
 
@@ -580,6 +603,7 @@ def test_revision_updates_and_adds_entries(client, monkeypatch):
     uid = _register(client)
     _seed_food()                                   # food 1: rice cake
     _seed_food(name="blackberries", serving_g=None)  # food 2
+    _knows_food(uid, 2)                            # id offered via favourites
 
     # Initial log via fast path (user knows rice cakes).
     _log_once(uid, 1)
@@ -627,6 +651,7 @@ def test_corrective_followup_tags_what_was_wrong(client, monkeypatch):
     uid = _register(client)
     _seed_food(name="gatorade", serving_g=591.0)
     _seed_food(name="banana", serving_g=118.0)
+    _knows_food(uid, 2)
 
     _log_once(uid, 1)
     r1 = client.post("/api/agent/log", data={"text": "I had a gatorade"})
@@ -936,8 +961,9 @@ def test_same_food_cannot_be_logged_twice_in_one_capture(client, monkeypatch):
     logged. Haiku does it too — a breakfast logged white rice twice at 110g."""
     from app.routers import agent as agent_router
     monkeypatch.setattr(agent_router, "ANTHROPIC_API_KEY", "test-key")
-    _register(client)
-    _seed_food(name="meat lovers pizza", serving_g=127.0)
+    uid = _register(client)
+    fid = _seed_food(name="meat lovers pizza", serving_g=127.0)
+    _knows_food(uid, fid)
     _script_llm(monkeypatch, [
         _tool("log_food", {"food_id": 1, "basis": "estimate", "quantity_g": 127}, "t1"),
         _tool("log_food", {"food_id": 1, "basis": "estimate", "quantity_g": 254}, "t2"),
@@ -955,9 +981,10 @@ def test_different_foods_still_log_normally(client, monkeypatch):
     """The guard must not block a real multi-item meal."""
     from app.routers import agent as agent_router
     monkeypatch.setattr(agent_router, "ANTHROPIC_API_KEY", "test-key")
-    _register(client)
-    _seed_food(name="rice cake", serving_g=9.0)
-    _seed_food(name="banana", serving_g=118.0)
+    uid = _register(client)
+    a = _seed_food(name="rice cake", serving_g=9.0)
+    b = _seed_food(name="banana", serving_g=118.0)
+    _knows_food(uid, a); _knows_food(uid, b)
     _script_llm(monkeypatch, [
         _tool("log_food", {"food_id": 1, "basis": "count", "servings": 2, "quantity_g": 18}, "t1"),
         _tool("log_food", {"food_id": 2, "basis": "count", "servings": 1, "quantity_g": 118}, "t2"),
@@ -965,3 +992,78 @@ def test_different_foods_still_log_normally(client, monkeypatch):
     ])
     r = client.post("/api/agent/log", data={"text": "two rice cakes and a banana"})
     assert len(r.json()["entries"]) == 2
+
+
+# ── Fabricated food ids ──────────────────────────────────────────────────────
+
+def test_a_guessed_food_id_is_refused(client, monkeypatch):
+    """A yogurt breakfast came back with two phantom edamame entries: after
+    create_food returned 1926 the model logged 1631 instead — a four-day-old
+    Edamame row it had never been shown. log_food looked the id up, found a real
+    food, and logged it. An id must come from somewhere."""
+    from app.routers import agent as agent_router
+    monkeypatch.setattr(agent_router, "ANTHROPIC_API_KEY", "test-key")
+    _register(client)
+    _no_external(monkeypatch)
+    _seed_food(name="cereal, wheat flakes", serving_g=45.0)       # id 1: searched for
+    stale = _seed_food(name="edamame, frozen, prepared", serving_g=None)  # id 2: never shown
+    _script_llm(monkeypatch, [
+        _tool("search_food_db", {"query": "cereal flakes"}, "s1"),
+        _tool("log_food", {"food_id": stale, "basis": "estimate", "quantity_g": 45}, "t1"),
+        _text("Logged the cereal."),
+    ])
+    r = client.post("/api/agent/log", data={"text": "a bowl of wheat flake cereal"})
+    assert r.status_code == 200
+    names = [e["food_name"] for e in r.json()["entries"]]
+    assert "edamame, frozen, prepared" not in names
+    assert r.json()["entries"] == []           # refused, nothing invented
+
+
+def test_ids_from_a_search_are_accepted(client, monkeypatch):
+    from app.routers import agent as agent_router
+    monkeypatch.setattr(agent_router, "ANTHROPIC_API_KEY", "test-key")
+    _register(client)
+    _no_external(monkeypatch)
+    fid = _seed_food(name="cereal, wheat flakes", serving_g=45.0)
+    _script_llm(monkeypatch, [
+        _tool("search_food_db", {"query": "cereal flakes"}, "s1"),
+        _tool("log_food", {"food_id": fid, "basis": "estimate", "quantity_g": 45}, "t1"),
+        _text("Logged the cereal."),
+    ])
+    r = client.post("/api/agent/log", data={"text": "a bowl of wheat flake cereal"})
+    assert [e["food_name"] for e in r.json()["entries"]] == ["cereal, wheat flakes"]
+
+
+def test_ids_from_create_food_are_accepted(client, monkeypatch):
+    """The exact path that failed: create_food, then log what it returned."""
+    from app.routers import agent as agent_router
+    monkeypatch.setattr(agent_router, "ANTHROPIC_API_KEY", "test-key")
+    _register(client)
+    _no_external(monkeypatch)
+    _script_llm(monkeypatch, [
+        _tool("create_food", {"name": "wheat flake cereal", "values_per": "100g",
+                              "calories": 360, "protein_g": 10, "carbs_g": 75,
+                              "fat_g": 2, "basis": "estimate"}, "c1"),
+        # id 1 is what create_food returns in a fresh DB
+        _tool("log_food", {"food_id": 1, "basis": "estimate", "quantity_g": 45}, "t1"),
+        _text("Logged the cereal."),
+    ])
+    r = client.post("/api/agent/log", data={"text": "a bowl of wheat flake cereal"})
+    assert len(r.json()["entries"]) == 1
+
+
+def test_the_users_own_recents_remain_loggable_without_searching(client, monkeypatch):
+    """The recents list exists so familiar foods need no search — that must keep
+    working, or the guard would cost a turn on every repeat meal."""
+    from app.routers import agent as agent_router
+    monkeypatch.setattr(agent_router, "ANTHROPIC_API_KEY", "test-key")
+    uid = _register(client)
+    fid = _seed_food(name="oikos triple zero vanilla", serving_g=150.0)
+    _knows_food(uid, fid)
+    _script_llm(monkeypatch, [
+        _tool("log_food", {"food_id": fid, "basis": "count", "servings": 1,
+                           "quantity_g": 150}, "t1"),
+        _text("Logged the yogurt."),
+    ])
+    r = client.post("/api/agent/log", data={"text": "my usual yogurt with a photo"})
+    assert len(r.json()["entries"]) == 1

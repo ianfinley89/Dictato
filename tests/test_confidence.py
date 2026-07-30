@@ -100,12 +100,16 @@ def test_endpoint_reports_confidence(client, monkeypatch):
     from tests.test_agent import _register, _seed_food, _script_llm, _tool, _text
     _register(client)
     _seed_food()
+    # Search first, exactly as the model must: that is where a valid food_id
+    # comes from (favouriting it instead would trigger the zero-token fast path
+    # and never reach the agent).
     _script_llm(monkeypatch, [
+        _tool("search_food_db", {"query": "rice cake"}, "s1"),
         _tool("log_food", {"food_id": 1, "basis": "count", "servings": 2,
                            "quantity_g": 18}, "t1"),
         _text("Logged two rice cakes."),
     ])
-    r = client.post("/api/agent/log", data={"text": "two rice cakes"})
+    r = client.post("/api/agent/log", data={"text": "two rice cakes for breakfast"})
     assert r.status_code == 200
     c = r.json()["confidence"]
     assert c["clarify"] is False and "score" in c and "threshold" in c

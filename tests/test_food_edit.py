@@ -111,10 +111,11 @@ def test_resync_does_not_claim_the_user_set_the_portion(client):
 def test_discard_capture_removes_every_entry(client, monkeypatch):
     from app.routers import agent as agent_router
     monkeypatch.setattr(agent_router, "ANTHROPIC_API_KEY", "test-key")
-    from tests.test_agent import _seed_food, _script_llm, _tool, _text
+    from tests.test_agent import _seed_food, _script_llm, _tool, _text, _knows_food
     uid = _register(client)
-    _seed_food()
-    _seed_food(name="berries", serving_g=None)
+    a = _seed_food()
+    b = _seed_food(name="berries", serving_g=None)
+    _knows_food(uid, a); _knows_food(uid, b)
     _script_llm(monkeypatch, [
         _tool("log_food", {"food_id": 1, "basis": "count", "servings": 2, "quantity_g": 18}, "t1"),
         _tool("log_food", {"food_id": 2, "basis": "estimate", "quantity_g": 100}, "t2"),
@@ -139,9 +140,10 @@ def test_discard_capture_removes_every_entry(client, monkeypatch):
 def test_cannot_discard_someone_elses_capture(client, monkeypatch):
     from app.routers import agent as agent_router
     monkeypatch.setattr(agent_router, "ANTHROPIC_API_KEY", "test-key")
-    from tests.test_agent import _seed_food, _script_llm, _tool, _text
-    _register(client)
+    from tests.test_agent import _seed_food, _script_llm, _tool, _text, _knows_food
+    uid = _register(client)
     _seed_food()
+    _knows_food(uid, 1)
     _script_llm(monkeypatch, [
         _tool("log_food", {"food_id": 1, "basis": "count", "servings": 1, "quantity_g": 9}, "t1"),
         _text("Logged."),

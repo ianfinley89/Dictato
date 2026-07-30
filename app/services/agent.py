@@ -258,14 +258,18 @@ def _user_context(user_id: int) -> str:
             {"u": user_id},
         ).fetchall()
     if not rows:
-        return ""
+        return "", set()
     items = [
         {"food_id": r["id"], "name": r["name"],
          **({"brand": r["brand"]} if r["brand"] else {}),
          **({"serving_g": r["serving_g"]} if r["serving_g"] else {})}
         for r in rows
     ]
-    return "\n\nThe user's favorite/recent foods (log these ids directly when they match):\n" + json.dumps(items)
+    text = ("\n\nThe user's favorite/recent foods (log these ids directly when they match):\n"
+            + json.dumps(items))
+    # The ids handed over here are legitimately loggable without a search, so the
+    # offered-id guard has to know about them.
+    return text, {r["id"] for r in rows}
 
 
 def _fmt_candidates(foods: list[dict]) -> list[dict]:
@@ -497,7 +501,8 @@ async def _execute_tool(name: str, inp: dict, user_id: int, method: str,
                         note: str | None, logged: list, annotation: dict,
                         existing_food_ids: dict | None = None,
                         corrections: list | None = None,
-                        nutrition_warnings: dict | None = None) -> dict:
+                        nutrition_warnings: dict | None = None,
+                        offered_ids: set | None = None) -> dict:
     # In a follow-up ("that was wrong — it was a bottle, not a litre") the tools
     # the model reaches for ARE the correction taxonomy: what it changed says what
     # was wrong. Deterministic, no self-report, no extra tokens.
@@ -512,12 +517,28 @@ async def _execute_tool(name: str, inp: dict, user_id: int, method: str,
         if not query:
             return {"error": "query is required"}
         foods = await search_foods(query, user_id, limit=6, brand=(inp.get("brand") or None))
+        if offered_ids is not None:
+            offered_ids |= {f["id"] for f in foods}
         return {"candidates": _fmt_candidates(foods)} if foods else {"candidates": [], "note": "no matches — try a simpler name, or web_search/create_food"}
     if name == "create_food":
-        return await _tool_create_food(user_id, inp, nutrition_warnings)
+        out = await _tool_create_food(user_id, inp, nutrition_warnings)
+        if offered_ids is not None and out.get("food_id"):
+            offered_ids.add(out["food_id"])
+        return out
     if name == "log_food":
-        # Revision guard: the same food again means adjust, not duplicate.
         fid = inp.get("food_id")
+        # A food_id the model was never SHOWN is a guess, and guesses land on real
+        # rows: after create_food returned 1926 the model logged 1631 instead —
+        # a four-day-old Edamame row — so a yogurt breakfast came back with two
+        # phantom edamame entries. Ids are only valid if they came from a search,
+        # from create_food, from the user's own recents, or (in revision) from the
+        # entries being reconciled.
+        if offered_ids is not None and fid not in offered_ids:
+            return {"error": f"food_id {fid} was not in any search result, create_food "
+                             f"response, or the user's recent foods — do not guess ids. "
+                             f"search_food_db for the item and use an id it returns "
+                             f"(or the food_id create_food gave you)."}
+        # Revision guard: the same food again means adjust, not duplicate.
         if existing_food_ids and fid in existing_food_ids:
             return {"error": f"food_id {fid} is already logged as entry "
                              f"{existing_food_ids[fid]} — use update_entry with the "
@@ -592,8 +613,9 @@ async def run_agent(user_id: int, *, text: str | None = None,
 
     local_now = datetime.now(timezone.utc) - timedelta(minutes=max(-840, min(840, tz_offset)))
     note = (text or "photo")[:_MAX_NOTE]
+    context_text, offered_ids = _user_context(user_id)
     system = (_SYSTEM + f"\n\nUser's local time: {local_now.strftime('%A %H:%M')}."
-              + _user_context(user_id))
+              + context_text)
     if image:
         system += _PHOTO_HINT
     tools = [_SEARCH_TOOL, _CREATE_TOOL, _LOG_TOOL, _ANNOTATE_TOOL, _WEB_SEARCH_TOOL]
@@ -607,6 +629,7 @@ async def run_agent(user_id: int, *, text: str | None = None,
             transcript=json.dumps(revision.get("transcript") or "(photo, no words)"))
         tools = tools + [_UPDATE_ENTRY_TOOL, _REMOVE_ENTRY_TOOL]
         existing_food_ids = {e["food_id"]: e["id"] for e in revision.get("entries", [])}
+        offered_ids |= set(existing_food_ids)      # already-logged foods are known
     messages = [user_msg]
     logged: list[dict] = []
     annotation: dict = {}
@@ -641,7 +664,7 @@ async def run_agent(user_id: int, *, text: str | None = None,
         for tc in resp.tool_calls:
             out = await _execute_tool(tc.name, tc.input, user_id, method, note,
                                       logged, annotation, existing_food_ids,
-                                      corrections, nutrition_warnings)
+                                      corrections, nutrition_warnings, offered_ids)
             results.append({"id": tc.id, "name": tc.name, "content": json.dumps(out)})
         if not results:
             break
