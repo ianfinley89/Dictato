@@ -354,7 +354,23 @@ $('confirm-log-btn').addEventListener('click', async () => {
   const qty = parseFloat(confirmQty.value);
   if (!qty || qty <= 0) { showToast('Enter a quantity.', 'error'); return; }
   const foodName = state.pendingFood.name;
+  const adjusting = _adjustingEntryId;
+  _adjustingEntryId = null;
   try {
+    if (adjusting) {
+      // Same food, new amount: edit in place so the entry id — and therefore the
+      // link back to the capture that produced it — survives the correction.
+      const same = await entryHasFood(adjusting, state.pendingFood.id);
+      if (same) {
+        await api.put(`/api/log/${adjusting}/portion`, { quantity_g: qty, basis: 'manual' });
+        confirmOverlay.classList.add('hidden');
+        state.pendingFood = null;
+        showToast(`Updated ${foodName}`, 'success');
+        await goToToday();
+        return;
+      }
+      await api.del(`/api/log/${adjusting}`);   // they swapped the food itself
+    }
     await api.post('/api/log/', { food_id: state.pendingFood.id, quantity_g: qty, source: _confirmSource });
     confirmOverlay.classList.add('hidden');
     state.pendingFood = null;
@@ -365,12 +381,19 @@ $('confirm-log-btn').addEventListener('click', async () => {
   }
 });
 
+// Is the entry still on the same food the user is confirming?
+async function entryHasFood(entryId, foodId) {
+  const e = (state.dayLog || []).find(x => x.id === entryId);
+  return !!e && e.food_id === foodId;
+}
+
 // Drop trailing .0 so "1" shows instead of "1.0", but keep "0.5".
 function _trimNum(x) {
   return Math.round(x * 100) / 100;
 }
 
 $('confirm-cancel-btn').addEventListener('click', () => {
+  _adjustingEntryId = null;      // cancelling an adjust leaves the entry as it was
   confirmOverlay.classList.add('hidden');
   state.pendingFood = null;
 });
@@ -834,11 +857,16 @@ function entryHtml(e) {
 
 // Tap an entry to adjust it: remove it, then reopen the confirm panel prefilled
 // with the same food and quantity so it can be corrected and re-logged.
+// Adjust used to DELETE the entry and create a replacement, which broke the
+// training data: the correction arrived as "user deleted this item" and the
+// value they actually wanted was never linked to the capture. Keep the entry and
+// edit it in place; only fall back to delete+create if they swap the food.
+let _adjustingEntryId = null;
+
 async function adjustEntry(entryId, foodId, qty) {
   try {
     const food = await api.get(`/api/foods/${foodId}`);
-    await api.del(`/api/log/${entryId}`);
-    await goToToday();
+    _adjustingEntryId = parseInt(entryId, 10);
     $('result-card').classList.add('hidden');
     openConfirm(food, parseFloat(qty) || 100, 'manual');
   } catch (err) { showToast(err.message, 'error'); }

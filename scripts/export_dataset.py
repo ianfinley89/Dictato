@@ -22,20 +22,37 @@ from app.database import get_conn
 
 
 def _entry_label(conn, snap: dict) -> dict:
-    """A snapshot entry, corrected to its live state (kept + final quantity)."""
+    """A snapshot entry, corrected to its live state.
+
+    The snapshot is what the MODEL produced; the label has to be what the user
+    ended up with. Three corrections can arrive after the fact: the entry is
+    undone (kept=False), its quantity is fixed, or the food itself is renamed —
+    "kodak protein pancakes" becoming "kodiak protein pancakes" is exactly the
+    signal worth training on, and reading the frozen name would throw it away.
+    """
     label = {k: snap.get(k) for k in
              ("food_name", "food_brand", "quantity_g", "food_source",
               "calories", "protein_g", "carbs_g", "fat_g", "fiber_g")}
+    label["model_food_name"] = snap.get("food_name")   # what it originally said
     live = None
     if snap.get("id"):
         live = conn.execute(
-            "SELECT quantity_g, nutrients_snapshot_json FROM log_entries WHERE id=?",
+            """SELECT le.quantity_g, le.nutrients_snapshot_json, le.portion_manual,
+                      f.name AS food_name, f.brand AS food_brand
+               FROM log_entries le JOIN foods f ON f.id = le.food_id
+               WHERE le.id = ?""",
             (snap["id"],),
         ).fetchone()
     label["kept"] = live is not None
     if live:
         label["quantity_g"] = live["quantity_g"]
+        label["food_name"] = live["food_name"]
+        label["food_brand"] = live["food_brand"]
+        # The user set this amount by hand — a verified portion, not an accepted one.
+        label["portion_corrected"] = bool(live["portion_manual"])
         label.update(json.loads(live["nutrients_snapshot_json"]))
+    if label.get("model_food_name") == label.get("food_name"):
+        label.pop("model_food_name")           # only note it when it changed
     return label
 
 

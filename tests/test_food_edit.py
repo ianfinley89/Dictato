@@ -153,3 +153,78 @@ def test_cannot_discard_someone_elses_capture(client, monkeypatch):
     client.post("/api/auth/register", json={"email": "thief@example.com",
                                             "password": "password123", "display_name": "T"})
     assert client.delete(f"/api/agent/capture/{cap_id}").status_code == 403
+
+
+# ── The training label must reflect what the user ended up with ──────────────
+def _export(conn_free=True) -> list:
+    import io, json as _json
+    from scripts.export_dataset import export
+    buf = io.StringIO()
+    export(buf)
+    return [_json.loads(l) for l in buf.getvalue().splitlines() if l.strip()]
+
+
+def test_a_rename_reaches_the_training_label(client, monkeypatch):
+    """"kodak" -> "kodiak" is exactly the signal worth training on; reading the
+    frozen snapshot name would throw it away."""
+    from app.routers import agent as agent_router
+    monkeypatch.setattr(agent_router, "ANTHROPIC_API_KEY", "test-key")
+    from tests.test_agent import _seed_food, _script_llm, _tool, _text, _knows_food
+    uid = _register(client)
+    fid = _seed_food(name="kodak protein pancakes", serving_g=124.0)
+    _knows_food(uid, fid)
+    _script_llm(monkeypatch, [
+        _tool("log_food", {"food_id": fid, "basis": "count", "servings": 1,
+                           "quantity_g": 124}, "t1"),
+        _text("Logged the pancakes."),
+    ])
+    client.post("/api/agent/log", data={"text": "kodak protein pancakes"})
+    with get_conn() as conn:
+        conn.execute("UPDATE foods SET name='kodiak protein pancakes' WHERE id=?", (fid,))
+
+    item = _export()[0]["items"][0]
+    assert item["food_name"] == "kodiak protein pancakes"
+    assert item["model_food_name"] == "kodak protein pancakes"
+
+
+def test_an_undone_item_stays_in_the_example_as_a_negative(client, monkeypatch):
+    """The model's original guess IS the input; deleting it would destroy the
+    negative example. It must survive, labelled kept=False."""
+    from app.routers import agent as agent_router
+    monkeypatch.setattr(agent_router, "ANTHROPIC_API_KEY", "test-key")
+    from tests.test_agent import _seed_food, _script_llm, _tool, _text, _knows_food
+    uid = _register(client)
+    fid = _seed_food(name="edamame, frozen", serving_g=None)
+    _knows_food(uid, fid)
+    _script_llm(monkeypatch, [
+        _tool("log_food", {"food_id": fid, "basis": "estimate", "quantity_g": 45}, "t1"),
+        _text("Logged it."),
+    ])
+    entry_id = client.post("/api/agent/log",
+                           data={"text": "some greens"}).json()["entries"][0]["id"]
+    client.delete(f"/api/log/{entry_id}")
+
+    item = _export()[0]["items"][0]
+    assert item["food_name"] == "edamame, frozen"     # still present
+    assert item["kept"] is False                      # but labelled as removed
+
+
+def test_a_portion_fix_is_marked_as_user_set(client, monkeypatch):
+    from app.routers import agent as agent_router
+    monkeypatch.setattr(agent_router, "ANTHROPIC_API_KEY", "test-key")
+    from tests.test_agent import _seed_food, _script_llm, _tool, _text, _knows_food
+    uid = _register(client)
+    fid = _seed_food(name="rice cake", serving_g=9.0)
+    _knows_food(uid, fid)
+    _script_llm(monkeypatch, [
+        _tool("log_food", {"food_id": fid, "basis": "estimate", "quantity_g": 100}, "t1"),
+        _text("Logged it."),
+    ])
+    entry_id = client.post("/api/agent/log",
+                           data={"text": "a snack"}).json()["entries"][0]["id"]
+    client.put(f"/api/log/{entry_id}/portion", json={"quantity_g": 27})
+
+    item = _export()[0]["items"][0]
+    assert item["kept"] is True
+    assert item["quantity_g"] == pytest.approx(27.0)   # the corrected amount
+    assert item["portion_corrected"] is True           # and that a human set it
