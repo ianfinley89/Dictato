@@ -43,7 +43,6 @@ _SYNONYMS = {
     "milliliters": "ml", "millilitres": "ml", "liters": "l", "litres": "l",
 }
 
-_MAX_RELATIVE = 4.0            # "four servings" is the top of a believable claim
 _MAX_ENTRY_G = 2500.0          # nothing a person eats in one sitting weighs more
 _MAX_SERVING_MULT = 20.0       # >20 servings of one food in one log is a misfire
 
@@ -294,20 +293,6 @@ def resolve_grams(food: dict, inp: dict) -> dict:
                     "confidence": "medium", "note": f"{h_qty:g} {u} at ~1g/ml"}
         # Unknown unit with no food portion data — fall through to the estimate.
 
-    # Rung 3.5: a RELATIVE size. Absolute mass is the thing the model is worst at
-    # — 85% of restaurant entries were blind gram guesses, and that is where the
-    # 2-4x side overshoot lives — while "about one-and-a-half servings" is a
-    # judgement it can actually make. The multiple is the model's; what a serving
-    # WEIGHS comes from the food's own size, its USDA measure, or the typical
-    # serving for its kind (portion_class.anchor_grams).
-    rel = _num(inp.get("servings_relative"))
-    anchor = _num(inp.get("_anchor_g"))
-    if rel > 0 and anchor > 0:
-        rel = min(rel, _MAX_RELATIVE)
-        return {"grams": rel * anchor, "basis": "relative", "confidence": "medium",
-                "note": f"{rel:g}x a typical serving ({anchor:g}g"
-                        + (f", {inp['_anchor_src']})" if inp.get("_anchor_src") else ")")}
-
     # Rung 4: the model's guess.
     if qty_g > 0:
         return {"grams": qty_g, "basis": "estimate", "confidence": "low", "note": None}
@@ -327,7 +312,8 @@ _BULK_DESC_RE = re.compile(
     r"|\byields?\b|\bbulk\b|\bcase\b", re.I)
 
 
-def build_options(food: dict, current_g: float, prior: dict | None = None) -> list[dict]:
+def build_options(food: dict, current_g: float, prior: dict | None = None,
+                  class_typical: dict | None = None) -> list[dict]:
     """Human-meaningful portion choices for one logged entry, every gram figure
     coming from USDA data, the food's own serving size, or the user's own
     history — never from a model. This is what lets a wrong portion be fixed by
@@ -377,8 +363,15 @@ def build_options(food: dict, current_g: float, prior: dict | None = None) -> li
     if prior and prior.get("grams"):
         add("your usual", prior["grams"], "history")
 
-    # 4. Only when the food knows nothing about itself (no USDA measure, no
-    #    serving size — 60% of what users log) fall back to scaling the guess.
+    # 4. Half of all logged foods know nothing about their own size. What a
+    #    serving of this KIND weighs is a real number from the database, and as a
+    #    CHOICE the user can see and reject it is safe — silently clamping their
+    #    logged amount with it was not, and measured as inert anyway.
+    if class_typical and class_typical.get("grams"):
+        add(f"typical {class_typical.get('class', 'serving')}", class_typical["grams"],
+            "estimate")
+
+    # 5. Last resort when even the class is unknown: scale what was logged.
     if not opts and current_g > 0:
         add("half of this", current_g * 0.5, "estimate")
         add("this amount", current_g, "estimate")
@@ -424,11 +417,6 @@ def snap_estimate(food: dict, grams: float) -> tuple[float, str | None]:
         anchor, kind = max(per_unit), "largest household portion"
     elif food.get("serving_g"):
         anchor, kind = food["serving_g"], "serving"
-    elif food.get("_class_anchor_g"):
-        # Half of all logged foods carry no size of their own, so an unbounded
-        # guess used to sail straight through. What a serving of this KIND weighs
-        # is a weaker anchor than the food's own, but far better than none.
-        anchor, kind = food["_class_anchor_g"], food.get("_class_anchor_src") or "typical serving"
     else:
         return grams, None
     cap = _SNAP_MULT * anchor

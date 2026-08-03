@@ -181,3 +181,20 @@ def test_absurd_picked_portion_is_clamped(client):
     r = client.put(f"/api/log/{e['id']}/portion", json={"quantity_g": 99999})
     assert r.status_code == 200
     assert r.json()["quantity_g"] <= 2500
+
+
+def test_a_food_that_knows_nothing_still_offers_a_real_serving():
+    """Half of logged foods have no serving size and no USDA measure. What a
+    serving of the KIND weighs is a database fact, and offering it as a choice is
+    safe where silently clamping the logged amount was not."""
+    opts = build_options({}, current_g=200,
+                         class_typical={"grams": 150.0, "class": "yogurt"})
+    labels = [o["label"] for o in opts]
+    assert "typical yogurt" in labels
+    assert next(o for o in opts if o["label"] == "typical yogurt")["grams"] == 150.0
+
+
+def test_the_foods_own_measures_still_come_first():
+    opts = build_options({"portions": PICKLE_PORTIONS}, current_g=100,
+                         class_typical={"grams": 500.0, "class": "vegetable"})
+    assert "1 spear" in [o["label"] for o in opts]

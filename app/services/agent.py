@@ -26,7 +26,6 @@ from app.services.nutrition_guard import sanitize_per_100g
 from app.services.portion import (resolve_grams, guard_grams, snap_estimate,
                                   verify_claims, apply_personal_prior)
 from app.services.portion_history import personal_prior
-from app.services.portion_class import anchor_grams
 from app.services.plausibility import check_nutrition
 from app.services.profile import apply_profile_update
 from app.services.voice_parse import parse_local
@@ -173,14 +172,10 @@ _LOG_TOOL = {
             "food_id": {"type": "integer"},
             "quantity_g": {"type": "number"},
             "basis": {"type": "string",
-                      "enum": ["stated", "label", "count", "household", "relative", "estimate"]},
+                      "enum": ["stated", "label", "count", "household", "estimate"]},
             "servings": {"type": "number"},
             "household_qty": {"type": "number"},
             "household_unit": {"type": "string"},
-            "servings_relative": {"type": "number",
-                                  "description": "with basis 'relative': how many TYPICAL servings this portion is "
-                                                 "(0.5 = half a normal serving, 1 = normal, 2 = double). The server "
-                                                 "knows what a serving of this food weighs."},
         },
         "required": ["food_id", "quantity_g", "basis"],
     },
@@ -416,17 +411,9 @@ async def _tool_log_food(user_id: int, inp: dict, method: str, note: str | None,
     # Household measures need the food's USDA portion weights; so do counts when
     # the food has no serving size of its own ("two eggs" -> 2 x "1 large").
     needs_portions = (_num(inp.get("household_qty")) > 0
-                      or _num(inp.get("servings_relative")) > 0
                       or (_num(inp.get("servings")) > 0 and not food.get("serving_g")))
     if needs_portions and food.get("portions") is None:
         food = await ensure_portions(food)
-    # What one serving of this food weighs — its own size, its USDA measure, or
-    # the typical serving for its kind. Feeds both the relative rung and the
-    # snap, so a food that knows nothing about itself is still bounded.
-    anchor_g, anchor_src = anchor_grams(food)
-    if anchor_g:
-        inp = {**inp, "_anchor_g": anchor_g, "_anchor_src": anchor_src}
-        food = {**food, "_class_anchor_g": anchor_g, "_class_anchor_src": anchor_src}
     # The ladder does the mass math from the model's observation (hard rule: the
     # model reports, deterministic code converts); the guard clamps implausibles.
     res = resolve_grams(food, inp)

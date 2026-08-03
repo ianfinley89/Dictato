@@ -10,6 +10,7 @@ from app.services.logging import (log_entry_for_user, source_label, FoodNotFound
 from app.services.food_lookup import get_food_by_id, ensure_portions
 from app.services.portion import build_options, guard_grams, portion_label
 from app.services.portion_history import personal_prior
+from app.services.portion_class import typical_serving
 
 router = APIRouter(prefix="/api/log", tags=["log"])
 
@@ -164,7 +165,9 @@ async def entry_portion_options(entry_id: int, request: Request):
         raise HTTPException(404, "Food not found")
     food = await ensure_portions(food)
     return {"entry_id": entry_id, "quantity_g": row["quantity_g"],
-            "options": build_options(food, row["quantity_g"], personal_prior(uid, row["food_id"]))}
+            "options": build_options(food, row["quantity_g"],
+                                     personal_prior(uid, row["food_id"]),
+                                     typical_serving(food.get("name") or ""))}
 
 
 @router.put("/{entry_id}/portion")
