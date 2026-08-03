@@ -280,3 +280,58 @@ def test_guard_caps_absolute():
 def test_guard_floor_and_passthrough():
     assert guard_grams(PLAIN, 0.2) == (1.0, None)
     assert guard_grams(TACO, 204.0) == (204.0, None)
+
+
+# ── Class-typical servings: an anchor for foods that know nothing ────────────
+def test_class_word_is_head_final_and_specific():
+    from app.services.portion_class import class_words
+    assert class_words("grilled chicken caesar salad")[0] == "salad"
+    assert class_words("Kodiak protein pancakes")[0] == "pancakes"
+    assert "organic" not in class_words("organic fresh yogurt")
+
+
+def test_a_tiny_unit_is_not_a_serving_anchor():
+    """USDA lists "1 piece" of dried cranberry at 0.4g. Using that as the anchor
+    would clamp a 30g log to under a gram."""
+    from app.services.portion_class import anchor_grams
+    crumb = {"name": "cranberries, dried", "serving_g": None,
+             "portions": [{"unit": "piece", "qty": 1, "grams": 0.4, "desc": "1 piece"}]}
+    grams, src = anchor_grams(crumb)
+    assert grams is None or grams >= 15.0
+
+
+def test_the_foods_own_size_wins_over_its_class():
+    from app.services.portion_class import anchor_grams
+    known = {"name": "greek yogurt", "serving_g": 170.0, "portions": None}
+    assert anchor_grams(known) == (170.0, "serving")
+
+
+# ── The relative rung ────────────────────────────────────────────────────────
+def test_relative_size_beats_guessing_grams():
+    """The model judges "about 1.5 servings"; the server knows a serving is 150g."""
+    r = resolve_grams({"name": "greek yogurt", "serving_g": None},
+                      {"basis": "relative", "servings_relative": 1.5,
+                       "quantity_g": 400, "_anchor_g": 150.0, "_anchor_src": "typical yogurt"})
+    assert r["grams"] == pytest.approx(225.0)     # not the 400g guess
+    assert r["basis"] == "relative" and r["confidence"] == "medium"
+
+
+def test_relative_needs_an_anchor_to_mean_anything():
+    r = resolve_grams({"name": "mystery", "serving_g": None},
+                      {"basis": "relative", "servings_relative": 1.5, "quantity_g": 400})
+    assert r["basis"] == "estimate"               # falls back, flagged
+
+
+def test_an_absurd_multiple_is_capped():
+    r = resolve_grams({"name": "x", "serving_g": None},
+                      {"basis": "relative", "servings_relative": 40,
+                       "quantity_g": 100, "_anchor_g": 150.0})
+    assert r["grams"] <= 4 * 150.0
+
+
+def test_evidence_still_outranks_a_relative_judgement():
+    """A stated weight or a real count is evidence; a multiple is an opinion."""
+    r = resolve_grams({"name": "x", "serving_g": 100.0},
+                      {"basis": "count", "servings": 2, "count_verified": True,
+                       "servings_relative": 3, "_anchor_g": 150.0, "quantity_g": 1})
+    assert r["basis"] == "count" and r["grams"] == pytest.approx(200.0)
