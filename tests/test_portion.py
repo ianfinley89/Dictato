@@ -208,7 +208,19 @@ def test_parse_fndds_portion_description():
         {"portionDescription": "1 1/2 cups", "gramWeight": 237.0},  # dup unit: first wins
     ]}
     p = parse_usda_portions(detail)
-    assert p == [{"unit": "cup", "qty": 1, "grams": 158.0, "desc": "1 cup, cooked"}]
+    assert p == [{"unit": "cup", "qty": 1, "grams": 158.0, "desc": "1 cup, cooked"},
+                 {"unit": "serving", "qty": 1.0, "grams": 100.0, "desc": "1 serving"}]
+
+
+def test_quantity_not_specified_is_a_serving():
+    """FNDDS' gram weight for people who ate the food without saying how much.
+    For thousands of foods it is the ONLY measure, so dropping it left them with
+    no serving anchor at all."""
+    p = parse_usda_portions({"foodPortions": [
+        {"portionDescription": "Quantity not specified", "modifier": "90000",
+         "gramWeight": 244.0},
+    ]})
+    assert p == [{"unit": "serving", "qty": 1.0, "grams": 244.0, "desc": "1 serving"}]
 
 
 def test_parse_sr_legacy_amount_modifier():
@@ -221,6 +233,23 @@ def test_parse_sr_legacy_amount_modifier():
     ]}
     p = parse_usda_portions(detail)
     assert {x["unit"] for x in p} == {"tbsp", "cup"}
+
+
+def test_portion_codes_and_qualifiers_are_not_units():
+    """USDA files a numeric portion CODE in `modifier` and qualifiers like
+    'with skin' as both modifiers and unit names. Rendered literally these
+    become "1 90000" and "1 with skin" — measures nobody can pick."""
+    p = parse_usda_portions({"foodPortions": [
+        {"amount": 1.0, "modifier": "90000", "gramWeight": 18.0,
+         "measureUnit": {"name": "undetermined"}},
+        {"amount": 1.0, "modifier": "with skin", "gramWeight": 346.0,
+         "measureUnit": {"name": "undetermined"}},
+        {"amount": 1.0, "modifier": "", "gramWeight": 87.0,
+         "measureUnit": {"name": "paired raw w"}},
+        {"amount": 1.0, "modifier": "slice", "gramWeight": 28.0,
+         "measureUnit": {"name": "undetermined"}},
+    ]})
+    assert p == [{"unit": "slice", "qty": 1.0, "grams": 28.0, "desc": "1 slice"}]
 
 
 def test_parse_fraction_description():
@@ -236,9 +265,24 @@ def test_match_household_no_match():
 
 
 # ── Estimate snapping (down-only, blind guesses vs household reality) ────────
+BURGER = {"id": 4, "name": "Cheeseburger", "serving_g": None,
+          "portions": [{"unit": "cheeseburger", "qty": 1, "grams": 210.0,
+                        "desc": "1 cheeseburger"}]}
+
+
 def test_snap_caps_overshoot():
-    g, note = snap_estimate(RICE, 534)          # the Menu-Match jasmine case
-    assert g == 2 * 158.0 and "capped" in note
+    g, note = snap_estimate(BURGER, 900)
+    assert g == 2 * 210.0 and "capped" in note
+
+
+def test_snap_treats_a_volume_measure_as_a_fraction_of_the_dish():
+    """A cup of rice is about a serving; a cup of bibimbap is a third of the
+    bowl — and the two rows are indistinguishable (both ~160 g per cup). Capping
+    volume-measured foods at 2x put the ceiling under real servings the user
+    kept, so a cup buys a looser ceiling than a whole item does."""
+    g, note = snap_estimate(RICE, 534)          # 1 cup = 158 g
+    assert (g, note) == (534, None)
+    assert snap_estimate(RICE, 900)[0] == 4 * 158.0
 
 
 def test_snap_leaves_plausible_estimates_alone():
@@ -261,9 +305,20 @@ def test_snap_noop_without_any_anchor():
 
 
 def test_snap_normalizes_fractional_portion_qty():
-    food = {"portions": [{"unit": "cup", "qty": 0.5, "grams": 79.0}]}
+    food = {"portions": [{"unit": "patty", "qty": 0.5, "grams": 79.0}]}
     g, note = snap_estimate(food, 500)
     assert g == 2 * (79.0 / 0.5)                # per-UNIT weight, not per-row
+
+
+def test_snap_ignores_bulk_measures():
+    """USDA lists "1 large pot (60 FO, 12 servings)" for coffee. A pot is not a
+    ceiling on a cup — left in, it made the cap 3.6 kg and meaningless."""
+    coffee = {"portions": [
+        {"unit": "cup", "qty": 1, "grams": 240.0, "desc": "1 cup (8 fl oz)"},
+        {"unit": "large pot", "qty": 1, "grams": 1800.0,
+         "desc": "1 large pot (60 FO, 12 servings)"},
+    ]}
+    assert snap_estimate(coffee, 3000)[0] == 4 * 240.0
 
 
 # ── Guard ────────────────────────────────────────────────────────────────────

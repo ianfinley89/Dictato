@@ -13,9 +13,18 @@ copy .env.example .env      # Windows
 # cp .env.example .env      # Mac/Linux
 # Then edit .env with your API keys and a random SECRET_KEY
 
-# 3. Run
+# 3. Import USDA household measures (~13MB download, once)
+uv run python scripts/import_usda_reference.py --download
+
+# 4. Run
 uv run uvicorn app.main:app --reload
 ```
+
+Step 3 is optional but strongly recommended: it fills a local table with USDA's
+published gram weights ("1 cup 158g", "1 cheeseburger 210g") for 15k foods, so a
+food is anchored the moment it is cached instead of waiting on an API call.
+Without it, portion anchoring drops from 88% of cached foods to 48% and counts
+like "two eggs" have no gram weight to multiply. Safe to re-run.
 
 The first run downloads the local Whisper speech-to-text model (~500MB for
 `small`) — voice logging is transcribed on your own machine, no cloud STT.
@@ -214,6 +223,7 @@ denied*, it needs an elevated shell — the task runs S4U.
 ## Scripts
 
 ```bash
+uv run python scripts/import_usda_reference.py  # USDA household measures + recipe composition
 uv run python scripts/gen_vapid.py              # generate Web Push keys
 uv run python scripts/reset_password.py <email> <pw>
 uv run python scripts/export_dataset.py         # JSONL training examples from captures

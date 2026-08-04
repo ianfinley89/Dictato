@@ -313,7 +313,7 @@ def test_estimate_snapped_to_household_portion_but_count_is_not(client):
     from app.database import get_conn
     with get_conn() as conn:
         conn.execute("UPDATE foods SET portions_json=? WHERE id=?",
-                     ('[{"unit": "cup", "qty": 1, "grams": 158.0, "desc": "1 cup"}]', rice_id))
+                     ('[{"unit": "bowl", "qty": 1, "grams": 158.0, "desc": "1 bowl"}]', rice_id))
     from app.services.agent import _tool_log_food
     est = asyncio.run(_tool_log_food(
         uid, {"food_id": rice_id, "quantity_g": 534, "basis": "estimate"}, "voice", None, []))

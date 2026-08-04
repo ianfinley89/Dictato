@@ -91,6 +91,10 @@ def verify_claims(inp: dict, method: str, words: str | None) -> dict:
 def _norm_unit(unit: str) -> str:
     u = (unit or "").strip().lower().rstrip(".")
     u = u.split(",")[0].strip()            # "cup, diced" -> "cup" (coarse is fine)
+    # "cup (8 fl oz)" is a cup; left whole it reads as a countable item of its
+    # own. USDA also truncates the parenthetical, so split on the bracket, not
+    # on a matched pair.
+    u = u.split("(")[0].strip()
     u = _SYNONYMS.get(u, u)
     return u
 
@@ -107,6 +111,11 @@ def _frac(text: str) -> float:
     return total
 
 
+# "with skin", "without bone", "paired raw w", "dripping w" — a qualifier on the
+# food, never the thing being counted.
+_QUALIFIER_RE = re.compile(r"^(with|without|paired|dripping|orig)\b", re.I)
+
+
 def parse_usda_portions(detail: dict) -> list[dict]:
     """USDA /food/{fdcId} detail -> normalized [{unit, qty, grams, desc}].
     Handles FNDDS (portionDescription '1 cup') and SR Legacy/Foundation
@@ -120,7 +129,12 @@ def parse_usda_portions(detail: dict) -> list[dict]:
             continue
         desc = (p.get("portionDescription") or "").strip()
         qty, unit = None, ""
-        if desc and desc.lower() != "quantity not specified":
+        if desc.lower() == "quantity not specified":
+            # FNDDS' gram weight for people who ate the food without saying how
+            # much — the population-typical amount, which is what "a serving"
+            # means in everyday speech. Often the ONLY measure such a food has.
+            qty, unit, desc = 1.0, "serving", "1 serving"
+        elif desc:
             m = _DESC_RE.match(desc)
             if m:
                 try:
@@ -130,10 +144,18 @@ def parse_usda_portions(detail: dict) -> list[dict]:
         else:
             qty = p.get("amount")
             unit = (p.get("modifier") or "").strip()
+            # FNDDS puts a portion-description CODE in `modifier` ("90000"), not
+            # a unit — it would render as "1 90000".
+            if unit.isdigit():
+                unit = ""
             mu = ((p.get("measureUnit") or {}).get("name") or "").strip()
             if not unit and mu and mu.lower() != "undetermined":
                 unit = mu
         u = _norm_unit(unit)
+        # "with skin", "paired raw w" — a qualifier on the food, not the thing
+        # being counted. USDA files these as both modifiers and unit names.
+        if _QUALIFIER_RE.match(u):
+            continue
         if not u or not isinstance(qty, (int, float)) or qty <= 0 or u in seen:
             continue
         seen.add(u)
@@ -399,6 +421,16 @@ def apply_personal_prior(res: dict, prior: dict | None) -> dict:
 
 
 _SNAP_MULT = 2.0
+# A volume or weight measure names a fraction of the dish, so the same 2x on top
+# of it lands under a single real serving. Loosen it rather than clamp honest
+# portions — a ceiling that fires on correct guesses is worse than none.
+_SNAP_FRACTION_MULT = 4.0
+
+
+def _whole_portion_unit(unit: str) -> bool:
+    """Does this measure name a whole portion — an item you can hold, or the
+    serving itself — rather than a scoop out of one?"""
+    return unit == "serving" or unit not in _MEASURE_UNITS
 
 
 def snap_estimate(food: dict, grams: float) -> tuple[float, str | None]:
@@ -411,17 +443,26 @@ def snap_estimate(food: dict, grams: float) -> tuple[float, str | None]:
     stated/count/household resolutions and never raises a low guess — the
     tool-result note tells the model it was capped, so if it truly knows more
     it can re-log with count/stated."""
-    per_unit = [p["grams"] / p["qty"] for p in food.get("portions") or []
-                if p.get("qty") and p.get("grams")]
-    if per_unit:
-        anchor, kind = max(per_unit), "largest household portion"
+    caps = []
+    for p in food.get("portions") or []:
+        if not (p.get("qty") and p.get("grams")):
+            continue
+        if _BULK_DESC_RE.search(p.get("desc") or "") or _BULK_DESC_RE.search(p["unit"]):
+            continue                # a 12-serving pot is not a ceiling on one cup
+        per = p["grams"] / p["qty"]
+        # A cup of bibimbap is a FRACTION of the bowl, not the bowl — capping at
+        # 2x it put the ceiling below a real serving. Volume and weight measures
+        # therefore imply a looser ceiling than a whole item or a serving does.
+        mult = _SNAP_MULT if _whole_portion_unit(p["unit"]) else _SNAP_FRACTION_MULT
+        caps.append((mult * per, f"{mult:g}x the {p['unit']} portion"))
+    if caps:
+        cap, kind = max(caps)
     elif food.get("serving_g"):
-        anchor, kind = food["serving_g"], "serving"
+        cap, kind = _SNAP_MULT * food["serving_g"], f"{_SNAP_MULT:g}x the serving"
     else:
         return grams, None
-    cap = _SNAP_MULT * anchor
     if grams > cap:
-        return cap, f"estimate capped at {_SNAP_MULT:g}x the {kind} ({cap:.0f}g)"
+        return cap, f"estimate capped at {kind} ({cap:.0f}g)"
     return grams, None
 
 

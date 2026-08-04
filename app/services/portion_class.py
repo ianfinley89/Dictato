@@ -124,6 +124,15 @@ def anchor_grams(food: dict) -> tuple[float | None, str]:
     typical serving for its kind."""
     if food.get("serving_g"):
         return float(food["serving_g"]), "serving"
+    # USDA's own "1 serving" measure — for FNDDS foods this is the amount people
+    # ate when they didn't state one, which is the question being asked here.
+    # primary_unit_grams skips it on purpose (a serving is not a countable item),
+    # so read it directly rather than falling through to a class average.
+    for p in food.get("portions") or []:
+        if p.get("unit") == "serving" and p.get("qty") and p.get("grams"):
+            per = p["grams"] / p["qty"]
+            if per >= _MIN_ANCHOR_G:
+                return round(per, 1), "serving"
     from app.services.portion import primary_unit_grams      # local: avoids a cycle
     per_unit = primary_unit_grams(food)
     # primary_unit_grams answers "what is ONE of these" (right for counting three

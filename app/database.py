@@ -249,6 +249,20 @@ CREATE TRIGGER IF NOT EXISTS foods_fts_update AFTER UPDATE ON foods BEGIN
     INSERT INTO foods_fts(rowid, name, brand) VALUES (new.id, new.name, new.brand);
 END;
 
+-- USDA reference data imported once from the published datasets
+-- (scripts/import_usda_reference.py). Household measures for ~30k foods and
+-- recipe composition for ~12k, so a food is anchored the moment it is cached
+-- instead of waiting on a per-food API call that mostly never happened.
+CREATE TABLE IF NOT EXISTS usda_portions (
+    fdc_id TEXT PRIMARY KEY,
+    portions_json TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS usda_composition (
+    fdc_id TEXT PRIMARY KEY,
+    parts_json TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_log_user_eaten ON log_entries(user_id, eaten_at);
 -- Personal portion priors look up one user's history for one food on every
 -- estimate-basis log.

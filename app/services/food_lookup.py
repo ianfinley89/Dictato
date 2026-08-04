@@ -436,9 +436,19 @@ def _cache_food(food: dict) -> int:
                 nutrients_json = json.dumps(clean)
             except (TypeError, ValueError):
                 pass
+        # Household measures come from the locally imported USDA datasets, so a
+        # food arrives anchored instead of waiting for the first log that needs a
+        # measure to go fetch one.
+        portions_json = None
+        if food.get("source") == "usda" and food.get("source_id"):
+            row = conn.execute("SELECT portions_json FROM usda_portions WHERE fdc_id=?",
+                               (str(food["source_id"]),)).fetchone()
+            if row:
+                portions_json = row["portions_json"]
         cur = conn.execute(
-            """INSERT INTO foods (source, source_id, name, brand, serving_desc, serving_g, nutrients_json, expires_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            """INSERT INTO foods (source, source_id, name, brand, serving_desc, serving_g,
+                                  nutrients_json, expires_at, portions_json)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 food["source"],
                 food.get("source_id"),
@@ -448,6 +458,7 @@ def _cache_food(food: dict) -> int:
                 food.get("serving_g"),
                 nutrients_json,
                 food.get("expires_at"),
+                portions_json,
             ),
         )
         return cur.lastrowid
@@ -547,7 +558,19 @@ async def ensure_portions(food: dict) -> dict:
     the first time a household-measure log needs them; cached forever in
     foods.portions_json. Non-USDA sources have no portion endpoint — no-op."""
     if (food.get("portions") is not None or food.get("source") != "usda"
-            or not food.get("source_id") or not USDA_API_KEY):
+            or not food.get("source_id")):
+        return food
+    # The published datasets are imported locally, so most foods are answered
+    # without a network call at all (scripts/import_usda_reference.py).
+    with get_conn() as conn:
+        row = conn.execute("SELECT portions_json FROM usda_portions WHERE fdc_id=?",
+                           (str(food["source_id"]),)).fetchone()
+        if row:
+            conn.execute("UPDATE foods SET portions_json=? WHERE id=?",
+                         (row["portions_json"], food["id"]))
+            food["portions"] = json.loads(row["portions_json"])
+            return food
+    if not USDA_API_KEY:
         return food
     try:
         async with httpx.AsyncClient(timeout=10) as client:
