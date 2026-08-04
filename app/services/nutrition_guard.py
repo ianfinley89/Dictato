@@ -23,7 +23,14 @@ near zero, so we leave them alone).
 
 KCAL_PER_KJ = 4.184          # 1 kcal = 4.184 kJ
 _CAL_CEILING = 900.0         # pure fat is ~884 kcal/100g; nothing real is higher
-_ATWATER_MIN = 50.0          # only trust the macro-derived energy above this
+# Only trust the macro-derived energy above this. It was 50, which quietly
+# exempted every vegetable and fruit — precisely the foods where a kJ figure
+# stays under the 900 ceiling and so looks perfectly plausible (a raw carrot at
+# 173 "kcal"/100g sat in the live DB for a month). Alcohol, the case this gate
+# exists for, stays protected: drinks whose energy genuinely outruns their
+# macros carry almost no carbs, so they fall below 15 anyway, and the ones above
+# 15 (beer, sake) have energy/Atwater ratios outside the kJ band entirely.
+_ATWATER_MIN = 15.0
 _KJ_LOW, _KJ_HIGH = 3.5, 5.0  # energy/Atwater band that means "this is kJ"
 
 

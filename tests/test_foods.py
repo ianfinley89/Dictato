@@ -399,3 +399,32 @@ def test_search_survives_a_missing_index(client, monkeypatch):
     _seed_food("Plain Rice Cake")
     monkeypatch.setattr(food_lookup, "_fts_query", lambda q: None)
     assert food_lookup._search_local("Plain Rice Cake", 1, 5)
+
+
+# ── USDA energy units ────────────────────────────────────────────────────────
+def test_usda_energy_reads_kcal_not_kj():
+    """SR Legacy rows carry TWO nutrients both named "Energy" — kcal and kJ.
+    Keyed by name alone the kJ row wins by arriving last, and a raw carrot was
+    cached at 173 kcal/100g instead of 41 (fdc 170393, verified against the
+    live API)."""
+    from app.services.food_lookup import _parse_usda
+    food = _parse_usda({
+        "fdcId": 170393, "description": "Carrots, raw", "dataType": "SR Legacy",
+        "foodNutrients": [
+            {"nutrientName": "Energy", "unitName": "kcal", "value": 41.0},
+            {"nutrientName": "Energy", "unitName": "kJ", "value": 173.0},
+            {"nutrientName": "Protein", "unitName": "G", "value": 0.93},
+            {"nutrientName": "Carbohydrate, by difference", "unitName": "G", "value": 9.58},
+            {"nutrientName": "Total lipid (fat)", "unitName": "G", "value": 0.24},
+        ]})
+    assert json.loads(food["nutrients_json"])["calories"] == 41.0
+
+
+def test_usda_energy_survives_a_missing_unit():
+    """Older payloads omit unitName; an energy figure with no unit is still the
+    only one we have, so keep it rather than zeroing the food out."""
+    from app.services.food_lookup import _parse_usda
+    food = _parse_usda({
+        "fdcId": 1, "description": "Thing",
+        "foodNutrients": [{"nutrientName": "Energy", "value": 88.0}]})
+    assert json.loads(food["nutrients_json"])["calories"] == 88.0

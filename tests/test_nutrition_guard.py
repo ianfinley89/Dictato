@@ -68,6 +68,38 @@ def test_alcohol_spirit_not_touched():
     assert clean["calories"] == pytest.approx(231.0)
 
 
+def test_kj_vegetable_is_converted():
+    """The gap that let a raw carrot sit at 173 kcal/100g in production. Its
+    macros only imply ~44 kcal, so the Atwater signal is perfectly clear — but
+    the old 50 kcal floor exempted every vegetable and fruit, which is exactly
+    where a kJ figure stays under the 900 ceiling and looks plausible."""
+    clean, note = sanitize_per_100g(
+        {"calories": 173.0, "protein_g": 0.93, "carbs_g": 9.58, "fat_g": 0.24}
+    )
+    assert note and "kilojoules" in note
+    assert clean["calories"] == pytest.approx(41.3, abs=0.5)
+
+
+def test_kj_cucumber_is_converted():
+    clean, note = sanitize_per_100g(
+        {"calories": 65.0, "protein_g": 0.65, "carbs_g": 3.63, "fat_g": 0.11}
+    )
+    assert note and "kilojoules" in note
+    assert clean["calories"] == pytest.approx(15.5, abs=0.5)
+
+
+def test_beer_not_touched():
+    """Alcohol is why the floor exists, and it still holds at the lower one: a
+    drink whose energy genuinely outruns its macros is nearly carb-free, so it
+    stays under the floor — and the ones above it sit outside the kJ band."""
+    for drink in ({"calories": 43.0, "protein_g": 0.5, "carbs_g": 3.6, "fat_g": 0.0},
+                  {"calories": 85.0, "protein_g": 0.1, "carbs_g": 2.6, "fat_g": 0.0},
+                  {"calories": 29.0, "protein_g": 0.2, "carbs_g": 1.6, "fat_g": 0.0}):
+        clean, note = sanitize_per_100g(dict(drink))
+        assert note is None, f"guard wrongly rewrote {drink}"
+        assert clean["calories"] == pytest.approx(drink["calories"])
+
+
 def test_diet_soda_zero_calories_stays_zero():
     clean, note = sanitize_per_100g(
         {"calories": 0.0, "protein_g": 0.0, "carbs_g": 0.0, "fat_g": 0.0}

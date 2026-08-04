@@ -323,7 +323,18 @@ async def _search_off(query: str, limit: int) -> list[dict]:
 
 
 def _parse_usda(item: dict) -> Optional[dict]:
-    raw = {n["nutrientName"]: n.get("value", 0) for n in item.get("foodNutrients", [])}
+    # SR Legacy rows carry TWO nutrients both named "Energy" — one kcal, one kJ.
+    # Keyed by name alone the kJ row wins by arriving last, so a raw carrot was
+    # filed at 173 kcal/100g instead of 41. Read the unit.
+    raw: dict[str, float] = {}
+    for n in item.get("foodNutrients", []):
+        name = n.get("nutrientName")
+        if not name:
+            continue
+        unit = str(n.get("unitName") or "").upper()
+        if name in _ENERGY_NAMES and unit and unit != "KCAL":
+            continue
+        raw.setdefault(name, n.get("value", 0))
 
     def pick(names: set, default: float = 0.0) -> float:
         for name in names:
