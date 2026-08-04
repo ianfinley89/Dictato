@@ -445,3 +445,77 @@ def test_usda_prefers_specific_atwater_factors():
              "value": 550.62},
         ]})
     assert json.loads(food["nutrients_json"])["calories"] == pytest.approx(550.62)
+
+
+# ── Ranking: a plain food name must not return a packaged product ────────────
+def _r(name, brand=None, kcal=100.0):
+    return {"name": name, "brand": brand, "nutrients_per_100g": {"calories": kcal}}
+
+
+def test_ranking_demotes_packaged_products_for_a_generic_query():
+    """Packaged goods are titled exactly how people speak, so "OATMEAL" matched
+    every word and won the shortest-name tiebreak against "Oatmeal, NFS". That
+    is the wrong food twice over: a package quotes its per-100g AS SOLD, which
+    for anything you cook is the DRY weight — 377 kcal/100g against a real 71."""
+    from app.services.food_lookup import _rank_by_relevance
+    out = _rank_by_relevance(
+        [_r("Oatmeal", brand="Billion Bay", kcal=377.6), _r("Oatmeal, Nfs", kcal=76.0)],
+        "oatmeal")
+    assert out[0]["name"] == "Oatmeal, Nfs"
+
+
+def test_ranking_keeps_the_brand_when_the_user_named_one():
+    """The demotion sits after `hits`, so naming a product still wins outright —
+    a brand's own words appear in no generic row."""
+    from app.services.food_lookup import _rank_by_relevance
+    out = _rank_by_relevance(
+        [_r("Yogurt, Greek, Plain, Nonfat"), _r("Greek Yogurt", brand="Chobani, Inc.")],
+        "chobani greek yogurt")
+    assert out[0]["brand"] == "Chobani, Inc."
+
+
+def test_ranking_ignores_brand_words_that_are_also_food_words():
+    """"whole" is in Whole Foods, "black" in Black Rifle Coffee, "egg" inside
+    Eggland's. Testing brands by substring made nearly every generic query look
+    like it had named a brand, and nothing was ever demoted."""
+    from app.services.food_lookup import _rank_by_relevance
+    out = _rank_by_relevance(
+        [_r("Whole Milk", brand="Whole Foods Market", kcal=62.0),
+         _r("Milk, Whole, 3.25% Milkfat", kcal=61.0)],
+        "whole milk")
+    assert out[0]["name"] == "Milk, Whole, 3.25% Milkfat"
+
+
+def test_ranking_matches_the_head_noun_not_just_the_shortest_name():
+    """English is head-FINAL ("white RICE"); USDA is head-initial ("Rice,
+    white, cooked"). On length alone "Spaghetti Sauce" beat "Spaghetti,
+    cooked" — a dish containing the food, ranked above the food."""
+    from app.services.food_lookup import _rank_by_relevance
+    out = _rank_by_relevance(
+        [_r("Spaghetti Sauce", kcal=51.0), _r("Spaghetti, Cooked", kcal=158.0)],
+        "spaghetti")
+    assert out[0]["name"] == "Spaghetti, Cooked"
+
+
+def test_ranking_tolerates_plurals():
+    """"eggs" must find "Egg, whole, cooked, scrambled", or the generic row
+    loses on hits before any tiebreak is reached."""
+    from app.services.food_lookup import _rank_by_relevance
+    out = _rank_by_relevance(
+        [_r("Scrambled Eggs", brand="Eggland's Best, Inc.", kcal=113.0),
+         _r("Egg, Whole, Cooked, Scrambled", kcal=149.0)],
+        "scrambled eggs")
+    assert out[0]["name"] == "Egg, Whole, Cooked, Scrambled"
+
+
+def test_merge_usda_keeps_a_candidate_pool_for_the_ranker():
+    """The pool argument is a CANDIDATE budget, not a result count. Cutting to
+    the caller's limit here discarded every generic row before ranking could
+    weigh it: "mashed potatoes" kept five branded boxes of dry flakes and
+    dropped "Potato, mashed, NFS" entirely."""
+    from app.services.food_lookup import _merge_usda
+    generic = [{"fdcId": i, "description": f"Potato, mashed, variant {i}"} for i in range(6)]
+    relevance = [{"fdcId": 100 + i, "description": "MASHED POTATOES"} for i in range(5)]
+    merged = _merge_usda(generic, relevance, "mashed potatoes", 24)
+    assert len(merged) == 11
+    assert any("Potato, mashed" in m["description"] for m in merged)

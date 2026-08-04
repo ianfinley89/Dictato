@@ -210,6 +210,13 @@ def _covers(hay: str, token: str) -> bool:
     return token in hay or (token.endswith("s") and token[:-1] in hay)
 
 
+def _brand_names_token(brand: str, token: str) -> bool:
+    """Whole-word match against a brand. Substring matching is what makes
+    "eggs" find Eggland's and "pepper" find Dr Pepper's peppercorns."""
+    words = set(re.findall(r"[a-z0-9]+", (brand or "").lower()))
+    return token in words or token.rstrip("s") in words or f"{token}s" in words
+
+
 def _brand_coverage(foods: list[dict], tokens: list[str]) -> float:
     """How much of the query is matched by a result's BRAND.
 
@@ -249,15 +256,53 @@ def relevance_score(foods: list[dict], query: str) -> float:
 
 
 def _rank_by_relevance(foods: list[dict], query: str) -> list[dict]:
-    """Stable sort putting results that match more of the query first."""
+    """Stable sort putting results that match more of the query first.
+
+    Ties are broken AGAINST branded products when the user never named a brand.
+    Packaged goods are titled exactly as people speak — "OATMEAL", "WHITE RICE",
+    "SCRAMBLED EGGS" — so they matched every word and won the shortest-name
+    tiebreak against "Oatmeal, NFS". That is the wrong food twice over: a
+    packaged product quotes its per-100g AS SOLD, which for anything you cook is
+    the DRY weight. Someone logging a bowl of oatmeal was getting 377 kcal/100g
+    against a real 71, and dry spaghetti at 357 against a cooked 158.
+
+    The penalty sits after `hits`, so naming a product still wins outright — the
+    brand's own words ("kodiak", "oikos") appear in no generic row, so it takes
+    the comparison before this ever applies."""
     tokens = _query_tokens(query)
     if not tokens:
         return foods
+    # Did the user name a brand? A query word that some BRAND carries and no
+    # generic row's name uses — "chobani", "kodiak", "oikos". Testing brands
+    # alone is far too loose: "whole" is in Whole Foods, "black" in Black Rifle
+    # Coffee, and "egg" inside Eggland's, so nearly every generic query looked
+    # like it had named a brand and nothing was ever demoted.
+    generic_words: set[str] = set()
+    for f in foods:
+        if not f.get("brand"):
+            generic_words |= set(re.findall(r"[a-z0-9]+", (f.get("name") or "").lower()))
+    named_brand = any(
+        _brand_names_token(f.get("brand") or "", t)
+        for t in tokens if not _covers(" ".join(generic_words), t)
+        for f in foods
+    )
+
+    # English is head-FINAL ("white RICE"), USDA is head-initial ("Rice, white,
+    # cooked"). Matching the two heads says the row is that food rather than a
+    # dish containing it, which shortest-name alone gets backwards: it preferred
+    # "Spaghetti Sauce" to "Spaghetti, cooked" and "Beans And White Rice" to
+    # plain rice, purely on length.
+    head = tokens[-1]
 
     def score(f: dict) -> tuple:
-        hay = f"{f.get('name') or ''} {f.get('brand') or ''}".lower()
-        hits = sum(1 for t in tokens if t in hay)
-        return (-hits, len(f.get("name") or ""))
+        name = f.get("name") or ""
+        hay = f"{name} {f.get('brand') or ''}".lower()
+        # _covers, not `in`: "eggs" must find "Egg, whole, cooked, scrambled",
+        # or the generic row loses on hits before the tiebreak is even reached.
+        hits = sum(1 for t in tokens if _covers(hay, t))
+        branded = 1 if (f.get("brand") and not named_brand) else 0
+        off_head = 0 if _noun_match(_lead_noun(name), head) else 1
+        return (-hits, branded, off_head, len(name))
 
     return sorted(foods, key=score)
 
@@ -269,9 +314,16 @@ def _generic_rank(item: dict) -> tuple:
     return (0 if "raw" in desc else 1, len(desc))
 
 
-def _merge_usda(generic: list[dict], relevance: list[dict], query: str, limit: int) -> list[dict]:
+def _merge_usda(generic: list[dict], relevance: list[dict], query: str, pool: int) -> list[dict]:
     """Closely-matching generic whole foods first (so 'tomato' → 'Tomatoes, raw'),
-    then USDA's relevance order (so 'dr pepper' still yields the brand). Deduped."""
+    then USDA's relevance order (so 'dr pepper' still yields the brand). Deduped.
+
+    `pool` is a CANDIDATE budget, not the number of results. USDA's relevance
+    order leads with packaged products, so cutting to the caller's limit here
+    discarded every generic row before `_rank_by_relevance` could weigh it — the
+    wider generic fetch above was being thrown away unread. Searching "mashed
+    potatoes" kept five branded boxes of dry flakes and dropped "Potato, mashed,
+    NFS" entirely; no amount of reordering can recover a row that is gone."""
     q = query.strip().lower()
     strong = sorted((f for f in generic if _is_strong_generic(f, q)), key=_generic_rank)
     merged, seen = [], set()
@@ -281,7 +333,7 @@ def _merge_usda(generic: list[dict], relevance: list[dict], query: str, limit: i
             continue
         seen.add(key)
         merged.append(f)
-    return merged[:limit]
+    return merged[:pool]
 
 
 async def _usda_call(query: str, limit: int, data_type: str | None) -> list[dict]:
@@ -303,7 +355,9 @@ async def _search_usda(query: str, limit: int) -> list[dict]:
     # composite dishes ('X salad', 'creamed X') rank ahead of it.
     generic = await _usda_call(query, max(limit, 25), "Foundation,SR Legacy,Survey (FNDDS)")
     relevance = await _usda_call(query, limit, None)
-    foods = _merge_usda(generic, relevance, query, limit)
+    # Hand the ranker a real pool. search_foods cuts to `limit` after ranking,
+    # and everything here is cached either way — the cache growing is the point.
+    foods = _merge_usda(generic, relevance, query, max(limit * 3, 24))
     return [p for item in foods if (p := _parse_usda(item))]
 
 
