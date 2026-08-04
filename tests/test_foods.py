@@ -428,3 +428,20 @@ def test_usda_energy_survives_a_missing_unit():
         "fdcId": 1, "description": "Thing",
         "foodNutrients": [{"nutrientName": "Energy", "value": 88.0}]})
     assert json.loads(food["nutrients_json"])["calories"] == 88.0
+
+
+def test_usda_prefers_specific_atwater_factors():
+    """Foundation foods report energy TWICE — the flat 4/4/9 and USDA's per-food
+    coefficients. Prefer the specific one, deterministically: these lived in a
+    set, so iteration order (and the cached calories) depended on string hashing
+    and the same food cached at 551 or 588 on different runs."""
+    from app.services.food_lookup import _parse_usda
+    food = _parse_usda({
+        "fdcId": 2515376, "description": "Peanuts, raw", "dataType": "Foundation",
+        "foodNutrients": [
+            {"nutrientName": "Energy (Atwater General Factors)", "unitName": "kcal",
+             "value": 588.332},
+            {"nutrientName": "Energy (Atwater Specific Factors)", "unitName": "kcal",
+             "value": 550.62},
+        ]})
+    assert json.loads(food["nutrients_json"])["calories"] == pytest.approx(550.62)

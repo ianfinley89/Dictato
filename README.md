@@ -227,6 +227,7 @@ uv run python scripts/import_usda_reference.py  # USDA household measures + reci
 uv run python scripts/gen_vapid.py              # generate Web Push keys
 uv run python scripts/reset_password.py <email> <pw>
 uv run python scripts/export_dataset.py         # JSONL training examples from captures
+uv run python scripts/refetch_usda_nutrition.py  # re-read cached USDA foods (dry run; --apply to write)
 uv run python scripts/repair_entry_snapshots.py # re-freeze entry nutrition after a food row is corrected
 ```
 

@@ -11,11 +11,18 @@ from app.services.portion import parse_usda_portions
 USDA_BASE = "https://api.nal.usda.gov/fdc/v1"
 OFF_BASE = "https://world.openfoodfacts.org/cgi/search.pl"
 
-_ENERGY_NAMES = {"Energy", "Energy (Atwater General Factors)", "Energy (Atwater Specific Factors)"}
-_PROTEIN_NAMES = {"Protein"}
-_CARB_NAMES = {"Carbohydrate, by difference"}
-_FAT_NAMES = {"Total lipid (fat)"}
-_FIBER_NAMES = {"Fiber, total dietary"}
+# ORDER MATTERS, so these are tuples. Foundation foods report energy twice —
+# "Energy (Atwater General Factors)" (the flat 4/4/9) and "Energy (Atwater
+# Specific Factors)" (USDA's per-food coefficients, the better number: raw
+# peanuts are 551 kcal/100g specific, 588 general). Iterating a SET picked
+# whichever way string hashing fell that process, so the same food cached at
+# either value on different runs.
+_ENERGY_NAMES = ("Energy", "Energy (Atwater Specific Factors)",
+                 "Energy (Atwater General Factors)")
+_PROTEIN_NAMES = ("Protein",)
+_CARB_NAMES = ("Carbohydrate, by difference",)
+_FAT_NAMES = ("Total lipid (fat)",)
+_FIBER_NAMES = ("Fiber, total dietary",)
 
 # Serving-size units → grams (ml treated as ~1 g/ml, fine for beverages).
 _SERVING_UNIT_G = {"g": 1, "grm": 1, "gram": 1, "grams": 1,
@@ -336,7 +343,8 @@ def _parse_usda(item: dict) -> Optional[dict]:
             continue
         raw.setdefault(name, n.get("value", 0))
 
-    def pick(names: set, default: float = 0.0) -> float:
+    def pick(names: tuple, default: float = 0.0) -> float:
+        """First name that is present wins — hence the declared order."""
         for name in names:
             if name in raw:
                 return float(raw[name])
