@@ -53,11 +53,29 @@ def _is_hallucination(text: str) -> bool:
     return set(words) <= _JUNK_WORDS or " ".join(words) in _JUNK_PHRASES
 
 
+# Measured on every capture whose audio we kept: 26 recordings that produced a
+# real log peaked at no_speech_prob 0.087, while 6 that logged nothing bottomed
+# out at 0.195. A clean gap with no overlap, so the threshold sits in it.
+#
+# The old value was 0.6 — above anything Whisper ever actually emitted here — and
+# it was ANDed with the logprob test, so the guard never fired once in production.
+# One user got nine straight "I'm not sure what you ate" replies over five days
+# and left.
+_MAX_NO_SPEECH = 0.15
+# Decode confidence does NOT separate the two groups on its own: the worst real
+# log scored -0.590 and one hallucination scored -0.567, better than it. So this
+# is a backstop for badly-garbled decodes only, set clear of any real transcript.
+_MIN_LOGPROB = -0.9
+
+
 def _clean_transcript(segments) -> str:
-    """Join segments, dropping the ones Whisper itself doubts — the classic
-    hallucination signature is high no_speech_prob plus low decode confidence."""
+    """Join segments, dropping the ones Whisper itself doubts.
+
+    OR, not AND. Requiring both signals meant a segment had to be simultaneously
+    unlikely-to-be-speech and badly decoded, and hallucinated caption text is
+    fluent — it decodes cleanly, which is exactly why it slips through."""
     kept = [s.text.strip() for s in segments
-            if not (s.no_speech_prob > 0.6 and s.avg_logprob < -1.0)]
+            if not (s.no_speech_prob > _MAX_NO_SPEECH or s.avg_logprob < _MIN_LOGPROB)]
     text = " ".join(t for t in kept if t).strip()
     return "" if _is_hallucination(text) else text
 

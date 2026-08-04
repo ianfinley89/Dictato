@@ -33,7 +33,7 @@ _CAPTURE_ENTRY_KEYS = (
 
 def _record_capture(uid, input_type, transcript, summary, entries, fast_path,
                     annotation=None, photo_path=None, audio_path=None,
-                    parent_capture_id=None):
+                    parent_capture_id=None, mic_peak=None):
     """Persist every capture verbatim for later analysis / coaching / datasets.
     Best-effort: a logging failure must never break the actual food logging."""
     try:
@@ -44,11 +44,11 @@ def _record_capture(uid, input_type, transcript, summary, entries, fast_path,
                 """INSERT INTO capture_log
                    (user_id, input_type, transcript, summary, entries_json, fast_path,
                     meal, meal_label, tags_json, specificity, photo_path, audio_path,
-                    parent_capture_id)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    parent_capture_id, mic_peak)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (uid, input_type, transcript, summary, json.dumps(slim), 1 if fast_path else 0,
                  a.get("meal"), a.get("meal_label"), json.dumps(a.get("tags") or []),
-                 a.get("specificity"), photo_path, audio_path, parent_capture_id),
+                 a.get("specificity"), photo_path, audio_path, parent_capture_id, mic_peak),
             )
             return cur.lastrowid
     except Exception:
@@ -99,6 +99,9 @@ async def agent_log(
     text: str | None = Form(None),
     tz_offset: int = Form(0),
     revise_capture_id: int | None = Form(None),
+    # Peak amplitude the browser actually saw on the mic (0-1). A failing mic is
+    # otherwise invisible server-side — it looks like a user who stopped logging.
+    mic_peak: float | None = Form(None),
     audio: UploadFile | None = File(None),
     image: UploadFile | None = File(None),
 ):
@@ -137,11 +140,11 @@ async def agent_log(
             transcript = await stt.transcribe(blob)
         except Exception:
             _record_capture(uid, "voice", None, "(couldn't decode the audio)", [],
-                            fast_path=False, audio_path=audio_path)
+                            fast_path=False, audio_path=audio_path, mic_peak=mic_peak)
             raise HTTPException(422, "Couldn't decode the audio recording. Try again.")
         if not transcript:
             _record_capture(uid, "voice", None, "(no speech detected)", [],
-                            fast_path=False, audio_path=audio_path)
+                            fast_path=False, audio_path=audio_path, mic_peak=mic_peak)
             raise HTTPException(422, "Didn't catch any speech — try again.")
         input_type = "voice"
 
@@ -179,7 +182,8 @@ async def agent_log(
             if not image_bytes and is_weight_only(transcript, w["span"]):
                 summary = f"Recorded your weight: {w['display']}."
                 capture_id = _record_capture(uid, input_type, transcript, summary, [],
-                                             fast_path=True, audio_path=audio_path)
+                                             fast_path=True, audio_path=audio_path,
+                                             mic_peak=mic_peak)
                 return {"capture_id": capture_id, "transcript": transcript,
                         "summary": summary, "entries": [], "annotation": {},
                         "fast_path": True, "weight": w["display"]}
@@ -196,7 +200,7 @@ async def agent_log(
             annotation = agent.fast_path_annotation(transcript, entries, tz_offset)
             capture_id = _record_capture(uid, input_type, transcript, summary, entries,
                                          fast_path=True, annotation=annotation,
-                                         audio_path=audio_path)
+                                         audio_path=audio_path, mic_peak=mic_peak)
             return {"capture_id": capture_id, "transcript": transcript, "summary": summary,
                     "entries": entries, "annotation": annotation, "fast_path": True,
                     **({"weight": weighed["display"]} if weighed else {})}
@@ -221,7 +225,7 @@ async def agent_log(
         capture_id = _record_capture(uid, input_type, transcript, result["summary"], entries,
                                      fast_path=False, annotation=result.get("annotation"),
                                      photo_path=photo_path, audio_path=audio_path,
-                                     parent_capture_id=revise_capture_id)
+                                     parent_capture_id=revise_capture_id, mic_peak=mic_peak)
         # A photo follow-up has no words of its own — keep showing the original
         # transcript so the context reads as appended, not replaced.
         return {"capture_id": capture_id,

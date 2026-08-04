@@ -1041,6 +1041,86 @@ function closeVoiceOverlay() {
   voiceOverlay.classList.add('hidden');
 }
 
+// ── Input level meter ────────────────────────────────────────────────────────
+// A mic that records near-silence looks EXACTLY like a working one: the timer
+// counts up, Done is tappable, and only the result reveals that nothing was
+// heard. One user hit that nine times over five days and stopped using the app.
+// So show the level while recording, and keep the peak to send with the capture.
+//
+// Peak amplitude, not RMS: RMS on a mostly-quiet clip averages real speech away,
+// while the loudest sample answers the only question here — did ANY signal
+// arrive?
+const MIC_SILENT_PEAK = 0.01;     // below this over a whole take, nothing was heard
+const MIC_SILENT_MS = 2500;       // flat this long mid-take is worth saying out loud
+
+function startLevelMeter(stream) {
+  const bar = $('voice-level');
+  const fill = $('voice-level-fill');
+  const AC = window.AudioContext || window.webkitAudioContext;
+  const state = { peak: 0, stop: () => {} };
+  if (!AC) return state;                       // no Web Audio: recording still works
+
+  let ctx;
+  try {
+    ctx = new AC();
+  } catch { return state; }
+  if (ctx.state === 'suspended') ctx.resume().catch(() => {});
+
+  const analyser = ctx.createAnalyser();
+  analyser.fftSize = 1024;
+  ctx.createMediaStreamSource(stream).connect(analyser);
+  // getFloatTimeDomainData needs Safari 14.1+; older iOS has only the byte
+  // version, where 128 is silence and samples run 0-255. Phones are the whole
+  // audience here, so read whichever exists rather than throwing every frame.
+  const useFloat = typeof analyser.getFloatTimeDomainData === 'function';
+  const buf = useFloat ? new Float32Array(analyser.fftSize)
+                       : new Uint8Array(analyser.fftSize);
+  const started = Date.now();
+  let lastSound = Date.now();
+  let raf = 0;
+  bar.classList.remove('is-silent');
+
+  const tick = () => {
+    let peak = 0;
+    if (useFloat) {
+      analyser.getFloatTimeDomainData(buf);
+      for (let i = 0; i < buf.length; i++) {
+        const v = Math.abs(buf[i]);
+        if (v > peak) peak = v;
+      }
+    } else {
+      analyser.getByteTimeDomainData(buf);
+      for (let i = 0; i < buf.length; i++) {
+        const v = Math.abs(buf[i] - 128) / 128;
+        if (v > peak) peak = v;
+      }
+    }
+    if (peak > state.peak) state.peak = peak;
+    if (peak > MIC_SILENT_PEAK) lastSound = Date.now();
+    // sqrt curve: speech peaks sit low in a linear scale and barely move the bar
+    fill.style.width = `${Math.min(100, Math.sqrt(peak) * 140)}%`;
+    const quietFor = Date.now() - lastSound;
+    if (quietFor > MIC_SILENT_MS && Date.now() - started > MIC_SILENT_MS) {
+      bar.classList.add('is-silent');
+      voiceOverlayTranscript.innerHTML =
+        '<span class="voice-hint">I can\'t hear your mic — check that this site has mic access, '
+        + 'or that a headset isn\'t selected.</span>';
+    } else if (quietFor < 400) {
+      bar.classList.remove('is-silent');
+    }
+    raf = requestAnimationFrame(tick);
+  };
+  raf = requestAnimationFrame(tick);
+
+  state.stop = () => {
+    cancelAnimationFrame(raf);
+    fill.style.width = '0%';
+    bar.classList.remove('is-silent');
+    ctx.close().catch(() => {});
+  };
+  return state;
+}
+
 // Chrome/Android record webm/opus; iOS Safari records mp4/AAC. Whisper on the
 // server decodes both, so we just pick whatever this browser supports.
 function pickAudioMime() {
@@ -1086,8 +1166,12 @@ async function startVoiceCapture() {
     mediaRecorder = new MediaRecorder(stream);   // last resort: browser defaults
   }
 
+  const meter = startLevelMeter(stream);
+
   mediaRecorder.ondataavailable = (e) => { if (e.data && e.data.size) recChunks.push(e.data); };
   mediaRecorder.onstop = () => {
+    const micPeak = meter.peak;
+    meter.stop();
     stream.getTracks().forEach(t => t.stop());
     setListening(false);
     closeVoiceOverlay();
@@ -1097,7 +1181,14 @@ async function startVoiceCapture() {
       showVoiceMsg("Didn't record anything — tap Say it and try again.", 5000);
       return;
     }
-    submitAgentLog({ audio: blob });
+    // Upload either way. A silent take still gets transcribed and answered
+    // honestly by the server guard; this only makes the message specific, so
+    // a mis-set threshold costs a slightly-wrong hint, never a lost log.
+    if (micPeak && micPeak < MIC_SILENT_PEAK) {
+      showVoiceMsg('Your mic recorded almost no sound — check mic access for this site, '
+                   + 'or whether a headset is selected.', 9000);
+    }
+    submitAgentLog({ audio: blob, micPeak });
   };
 
   openVoiceOverlay();
@@ -1121,7 +1212,7 @@ $('voice-overlay-cancel').addEventListener('click', () => {
 });
 
 // ── Agent logging (voice/photo → auto-logged entries + result card) ──────────
-async function submitAgentLog({ audio = null, image = null, photoUrl = '' }) {
+async function submitAgentLog({ audio = null, image = null, photoUrl = '', micPeak = null }) {
   showVoiceMsg(audio ? 'Transcribing & logging…' : 'Analyzing & logging…');
 
   const form = new FormData();
@@ -1131,6 +1222,9 @@ async function submitAgentLog({ audio = null, image = null, photoUrl = '' }) {
   if (reviseId) form.append('revise_capture_id', String(reviseId));
   if (audio) form.append('audio', audio, 'voice-note');
   if (image) form.append('image', image, 'meal.jpg');
+  // What the mic actually delivered. Recorded server-side so a failing mic is
+  // visible in telemetry instead of only as a user who quietly stops logging.
+  if (micPeak !== null) form.append('mic_peak', micPeak.toFixed(4));
 
   let result;
   try {

@@ -241,6 +241,7 @@ uv run python scripts/eval_photo.py      --tag base      # vision-model A/B on N
 uv run python scripts/calibrate_confidence.py            # is the confidence flag honest? (it wasn't)
 uv run python scripts/backtest_portion_prior.py          # would the personal portion prior have fired?
 uv run python scripts/eval_search_ranking.py             # does a plain food name return a number you could eat?
+uv run python scripts/eval_stt_guard.py                  # replay saved voice notes: is silence caught, is real speech kept?
 ```
 
 Read the docstrings before quoting numbers — several record what they

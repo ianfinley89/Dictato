@@ -485,6 +485,11 @@
       </div>
     </div>
     <div class="voice-overlay-status" id="voice-overlay-status">Recording…</div>
+    <!-- Proof the mic is alive. Without it a dead mic looks identical to a
+         working one until the log comes back wrong. -->
+    <div class="voice-level" id="voice-level" aria-hidden="true">
+      <div class="voice-level-fill" id="voice-level-fill"></div>
+    </div>
     <div class="voice-overlay-transcript" id="voice-overlay-transcript">
       <span class="voice-hint">Say something like "I had a rice cake"</span>
     </div>

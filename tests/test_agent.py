@@ -1067,3 +1067,30 @@ def test_the_users_own_recents_remain_loggable_without_searching(client, monkeyp
     ])
     r = client.post("/api/agent/log", data={"text": "my usual yogurt with a photo"})
     assert len(r.json()["entries"]) == 1
+
+
+# ── Mic health telemetry ─────────────────────────────────────────────────────
+def test_mic_peak_is_recorded_with_the_capture(client, monkeypatch):
+    """A failing mic is invisible from the server — it looks exactly like a user
+    who quietly stopped logging. Nine straight silent captures from one user went
+    unnoticed until their audio was replayed by hand; the browser knew all along
+    what the mic delivered, so it now says so."""
+    uid = _register(client)
+    _no_external(monkeypatch)
+    _knows_food(uid, _seed_food(name="apple", serving_g=180.0))
+    r = client.post("/api/agent/log", data={"text": "an apple", "mic_peak": "0.0031"})
+    assert r.status_code == 200
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT mic_peak FROM capture_log WHERE user_id=? ORDER BY id DESC LIMIT 1",
+            (uid,)).fetchone()
+    assert row["mic_peak"] == pytest.approx(0.0031)
+
+
+def test_mic_peak_is_optional(client, monkeypatch):
+    """Photo captures and any client older than this change send nothing, which
+    must not become a 422 on the logging path."""
+    uid = _register(client)
+    _no_external(monkeypatch)
+    _knows_food(uid, _seed_food(name="apple", serving_g=180.0))
+    assert client.post("/api/agent/log", data={"text": "an apple"}).status_code == 200

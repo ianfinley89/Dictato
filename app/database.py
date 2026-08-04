@@ -146,7 +146,8 @@ CREATE TABLE IF NOT EXISTS capture_log (
     specificity TEXT,                  -- low | medium | high — how precise the user was
     photo_path TEXT,                   -- saved capture photo (dataset material; deleted with account)
     audio_path TEXT,                   -- saved voice note (dataset material + STT-failure replay; deleted with account)
-    parent_capture_id INTEGER          -- set on follow-up refinements ("say more" / "add photo")
+    parent_capture_id INTEGER,         -- set on follow-up refinements ("say more" / "add photo")
+    mic_peak REAL                      -- peak mic amplitude 0-1 the browser saw; near 0 = the mic heard nothing
 );
 
 -- Durable per-user profile the coach builds up over time: goals context,
@@ -347,6 +348,12 @@ def _migrate(conn) -> None:
     for col in ("meal", "meal_label", "tags_json", "specificity", "photo_path", "audio_path"):
         if col not in cap_cols:
             conn.execute(f"ALTER TABLE capture_log ADD COLUMN {col} TEXT")
+    if "mic_peak" not in cap_cols:
+        # Peak amplitude (0-1) the browser saw on the mic. A failing mic is
+        # otherwise invisible from the server: it looks exactly like a user who
+        # quietly stopped logging, which is how nine straight silent captures
+        # went unnoticed until their audio was replayed by hand.
+        conn.execute("ALTER TABLE capture_log ADD COLUMN mic_peak REAL")
     if "parent_capture_id" not in cap_cols:
         conn.execute("ALTER TABLE capture_log ADD COLUMN parent_capture_id INTEGER")
 

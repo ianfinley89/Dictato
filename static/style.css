@@ -1664,6 +1664,30 @@ button:focus-visible, input:focus-visible, .chip:focus-visible {
   font-variant-numeric: tabular-nums;
 }
 
+/* Live input level. The point is that a dead mic reads flat WHILE recording,
+   instead of looking identical to a working one until the log comes back
+   wrong. `width` is set from JS every frame, so keep the transition short
+   enough to still look live. */
+.voice-level {
+  height: 6px;
+  border-radius: 3px;
+  background: var(--border, rgba(128, 128, 128, 0.25));
+  overflow: hidden;
+  margin: 0 auto 14px;
+  width: 78%;
+}
+
+.voice-level-fill {
+  height: 100%;
+  width: 0%;
+  border-radius: 3px;
+  background: var(--accent2);
+  transition: width 80ms linear;
+}
+
+/* Held flat for a couple of seconds: say so before they finish talking. */
+.voice-level.is-silent .voice-level-fill { background: var(--danger, #d9534f); width: 3% !important; }
+
 .voice-overlay-transcript {
   min-height: 60px;
   font-size: 1.25rem;
