@@ -306,3 +306,14 @@ def test_the_foods_own_size_wins_over_its_class():
     assert anchor_grams(known) == (170.0, "serving")
 
 
+
+
+def test_usda_names_are_head_initial_not_head_final():
+    """USDA leads with the food and trails qualifiers: "Rice, White, Cooked, Made
+    With Oil". Reading that head-final picks "oil" and hands rice a 15g oil
+    serving — caught on live data."""
+    from app.services.portion_class import class_words
+    assert class_words("Rice, White, Cooked, Made With Oil")[0] == "rice"
+    assert class_words("Egg, Whole, Cooked, Scrambled")[0] == "egg"
+    # ordinary English still reads head-final
+    assert class_words("grilled chicken caesar salad")[0] == "salad"

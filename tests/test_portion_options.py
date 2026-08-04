@@ -25,13 +25,13 @@ def _register(client) -> int:
     return client.post("/api/auth/register", json=REG).json()["user_id"]
 
 
-def _food(name="pickles", serving_g=None, portions=None) -> int:
+def _food(name="pickles", serving_g=None, portions=None, source_id=None) -> int:
     with get_conn() as conn:
         cur = conn.execute(
             """INSERT INTO foods (source, source_id, name, serving_desc, serving_g,
                                   portions_json, nutrients_json)
-               VALUES ('usda', NULL, ?, ?, ?, ?, ?)""",
-            (name, "1 cake" if serving_g else None, serving_g,
+               VALUES ('usda', ?, ?, ?, ?, ?, ?)""",
+            (source_id, name, "1 cake" if serving_g else None, serving_g,
              json.dumps(portions) if portions else None,
              json.dumps({"calories": 100.0, "protein_g": 5.0, "carbs_g": 10.0, "fat_g": 2.0})))
         return cur.lastrowid
@@ -198,3 +198,48 @@ def test_the_foods_own_measures_still_come_first():
     opts = build_options({"portions": PICKLE_PORTIONS}, current_g=100,
                          class_typical={"grams": 500.0, "class": "vegetable"})
     assert "1 spear" in [o["label"] for o in opts]
+
+
+# ── Backfilling USDA measures for foods people actually logged ───────────────
+def test_backfill_only_touches_logged_or_favourited_usda_foods(client, monkeypatch):
+    """One network call per food and a ~1000/hour USDA cap, so it must not walk
+    the whole cache — only the foods that need an anchor."""
+    import asyncio
+    from app.services import food_lookup
+    uid = _register(client)
+    logged = _food(name="cheeseburger", source_id="1234")
+    _food(name="never logged", source_id="9999")                      # must be skipped
+    client.post("/api/log/", json={"food_id": logged, "quantity_g": 200,
+                                   "source": "manual"})
+    seen = []
+
+    async def fake_ensure(food):
+        seen.append(food["id"])
+        with get_conn() as conn:
+            conn.execute("UPDATE foods SET portions_json=? WHERE id=?",
+                         (json.dumps([{"unit": "cheeseburger", "qty": 1,
+                                       "grams": 210.0, "desc": "1 cheeseburger"}]),
+                          food["id"]))
+        return {**food, "portions": [{"unit": "cheeseburger", "qty": 1,
+                                      "grams": 210.0, "desc": "1 cheeseburger"}]}
+
+    monkeypatch.setattr(food_lookup, "ensure_portions", fake_ensure)
+    monkeypatch.setattr(food_lookup, "USDA_API_KEY", "test-key")
+    n = asyncio.run(food_lookup.backfill_portions(limit=10))
+    assert seen == [logged] and n == 1
+
+
+def test_backfill_does_not_refetch_what_it_already_has(client, monkeypatch):
+    import asyncio
+    from app.services import food_lookup
+    uid = _register(client)
+    fid = _food(name="pickles", portions=PICKLE_PORTIONS, source_id="4321")   # already has measures
+    client.post("/api/log/", json={"food_id": fid, "quantity_g": 100,
+                                   "source": "manual"})
+    monkeypatch.setattr(food_lookup, "USDA_API_KEY", "test-key")
+
+    async def boom(food):
+        raise AssertionError("should not refetch")
+
+    monkeypatch.setattr(food_lookup, "ensure_portions", boom)
+    assert asyncio.run(food_lookup.backfill_portions(limit=10)) == 0

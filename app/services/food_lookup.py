@@ -477,6 +477,42 @@ def _row_to_food(row) -> dict:
     }
 
 
+async def backfill_portions(limit: int = 25) -> int:
+    """Fetch USDA household measures for foods people have actually logged.
+
+    `ensure_portions` only runs when something needs a measure right then, so in
+    practice almost nothing had them: 6% of logged foods, which left half of them
+    with no serving anchor at all — no gram weight for a count, nothing to bound a
+    wild guess, and a portion picker reduced to "half of this / double this".
+    Measured on the live cache, fetching these rescues 14 of 25.
+
+    Runs off the logging path (hourly, small batches) because it is a network call
+    per food and the USDA key is capped around 1000/hour. Returns how many gained
+    portions."""
+    if not USDA_API_KEY:
+        return 0
+    with get_conn() as conn:
+        rows = conn.execute(
+            """SELECT DISTINCT f.id FROM foods f
+               WHERE f.source = 'usda' AND f.source_id IS NOT NULL
+                 AND f.portions_json IS NULL
+                 AND (f.id IN (SELECT food_id FROM log_entries)
+                      OR f.id IN (SELECT food_id FROM favorites))
+               LIMIT ?""",
+            (limit,),
+        ).fetchall()
+    done = 0
+    for row in rows:
+        food = get_food_by_id(row["id"])
+        if not food:
+            continue
+        before = food.get("portions")
+        food = await ensure_portions(food)
+        if food.get("portions") is not None and before is None:
+            done += 1
+    return done
+
+
 def _norm_name(s: str) -> str:
     """Loose name key: lowercase, punctuation-free, plural-tolerant."""
     words = [w[:-1] if len(w) > 3 and w.endswith("s") else w

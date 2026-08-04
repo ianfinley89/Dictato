@@ -19,6 +19,7 @@ PROMPT = {
 
 
 _last_purge = 0.0
+_last_backfill = 0.0
 
 
 async def reminder_loop():
@@ -26,9 +27,27 @@ async def reminder_loop():
         try:
             await _tick()
             _maybe_purge()
+            await _maybe_backfill_portions()
         except Exception:
             pass  # never let the loop die
         await asyncio.sleep(60)
+
+
+async def _maybe_backfill_portions():
+    """Hourly: give logged foods their USDA household measures.
+
+    Kept off the logging path — it is one network call per food — but it is what
+    turns "no serving anchor" into "1 cheeseburger 210g", which the count rung,
+    the guess clamp and the portion picker all depend on."""
+    global _last_backfill
+    if time.time() - _last_backfill < 3600:
+        return
+    _last_backfill = time.time()
+    try:
+        from app.services.food_lookup import backfill_portions
+        await backfill_portions(limit=25)
+    except Exception:
+        pass
 
 
 def _maybe_purge():

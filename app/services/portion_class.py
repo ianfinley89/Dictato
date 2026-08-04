@@ -37,11 +37,19 @@ _cache: dict[str, dict | None] = {}
 
 
 def class_words(name: str) -> list[str]:
-    """Candidate class words, most specific first. English food names are
-    head-final — "grilled chicken CAESAR SALAD" — so the last word usually names
-    the kind."""
-    words = [w for w in re.findall(r"[a-z]+", (name or "").lower())
+    """Candidate class words, most specific first.
+
+    Two naming conventions collide. Ordinary English is head-FINAL — "grilled
+    chicken CAESAR SALAD" — but USDA inverts it, leading with the food and
+    trailing its qualifiers: "RICE, White, Cooked, Made With Oil". Read
+    head-final that name yields "oil", which handed rice a 15 g oil serving. A
+    comma is the signal that the first segment names the food."""
+    head = (name or "").split(",")[0] if "," in (name or "") else (name or "")
+    words = [w for w in re.findall(r"[a-z]+", head.lower())
              if len(w) > 2 and w not in _SKIP]
+    if not words:      # first segment was all qualifiers — use the whole name
+        words = [w for w in re.findall(r"[a-z]+", (name or "").lower())
+                 if len(w) > 2 and w not in _SKIP]
     return list(reversed(words))
 
 
