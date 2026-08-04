@@ -12,6 +12,24 @@ from app.services.scheduler import reminder_loop
 _STARTED_AT = datetime.now(timezone.utc)   # how long THIS process has been up
 
 
+def _current_commit() -> str:
+    """Read ONCE, at import. Asking git per request reports whatever HEAD is now,
+    which is the deploying developer's commit — a stale uvicorn holding the port
+    would answer with the very commit you were checking had landed. Frozen here,
+    a stale process reports the build it actually loaded."""
+    import subprocess
+    try:
+        return subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"], capture_output=True, text=True,
+            timeout=3, cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        ).stdout.strip() or "unknown"
+    except Exception:
+        return "unknown"
+
+
+_COMMIT = _current_commit()
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     os.makedirs("data", exist_ok=True)
@@ -89,16 +107,7 @@ async def health():
     """Which BUILD is actually serving. A stale uvicorn holding the port still
     answers 200 and still serves fresh static files from disk, so 'the site is
     up' proves nothing about the Python — check the commit here after deploying."""
-    import subprocess
-    commit = "unknown"
-    try:
-        commit = subprocess.run(["git", "rev-parse", "--short", "HEAD"],
-                                capture_output=True, text=True, timeout=3,
-                                cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-                                ).stdout.strip() or "unknown"
-    except Exception:
-        pass
-    return {"ok": True, "commit": commit,
+    return {"ok": True, "commit": _COMMIT,
             "started_at": _STARTED_AT.isoformat(timespec="seconds")}
 
 
