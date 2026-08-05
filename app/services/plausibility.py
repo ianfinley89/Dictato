@@ -23,8 +23,10 @@ import json
 import statistics
 
 from app.database import get_conn
+from app.services import food_sources
 
-_TRUSTED = ("usda", "off")
+_TRUSTED = food_sources.REFERENCE_STATS   # reference data only: learning
+                                          # from our own guesses is circular
 _MIN_NEIGHBOURS = 8      # below this the "class" is noise, not a distribution
 _TOO_HIGH = 2.0          # multiple of the class 90th percentile that reads wrong
 _FIELDS = ("calories", "protein_g", "carbs_g", "fat_g")

@@ -8,6 +8,7 @@ import json
 from datetime import datetime, timezone
 
 from app.database import get_conn
+from app.services import food_sources
 from app.services.food_lookup import get_food_by_id
 from app.services.portion import portion_label
 
@@ -16,16 +17,9 @@ class FoodNotFound(Exception):
     pass
 
 
-SOURCE_LABELS = {
-    "usda": "USDA",
-    "off": "Open Food Facts",
-    "fatsecret": "FatSecret",
-    "user": "Custom (yours)",
-    "manual": "Manual",
-    "recipe": "Recipe",
-    "estimate": "AI estimate",
-    "web": "Web (published)",
-}
+# Labels live with the rest of a source's properties, so a new source cannot be
+# added without one.
+SOURCE_LABELS = {k: s.label for k, s in food_sources.SOURCES.items()}
 
 
 def source_label(conn, food_id: int, food_source: str) -> str:
@@ -38,9 +32,10 @@ def source_label(conn, food_id: int, food_source: str) -> str:
                WHERE ri.recipe_food_id=?""",
             (food_id,),
         ).fetchall()
-        parts = sorted({SOURCE_LABELS.get(r["source"], r["source"] or "?") for r in rows})
+        parts = sorted({food_sources.get(r["source"]).label or (r["source"] or "?")
+                        for r in rows})
         return f"Recipe ({' + '.join(parts)})" if parts else "Recipe"
-    return SOURCE_LABELS.get(food_source, (food_source or "Unknown").title())
+    return food_sources.label(food_source)
 
 
 def log_entry_for_user(
@@ -58,7 +53,8 @@ def log_entry_for_user(
     food = get_food_by_id(food_id)
     if not food:
         raise FoodNotFound(f"Food {food_id} not found")
-    if food["source"] in ("user", "recipe", "estimate") and food.get("created_by_user_id") != user_id:
+    if (food["source"] in food_sources.PRIVATE
+            and food.get("created_by_user_id") != user_id):
         raise FoodNotFound(f"Food {food_id} not found")
 
     n = food["nutrients_per_100g"]

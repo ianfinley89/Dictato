@@ -663,6 +663,10 @@ $('result-discard').addEventListener('click', async () => {
 
 // ── Fix a food the AI created (wrong name from a misheard word, bad numbers) ──
 // Only AI-made rows are editable; USDA/OFF/FatSecret are shared reference data.
+// MIRRORS food_sources.EDITABLE on the server (app/services/food_sources.py).
+// Kept as a literal because eight constants are not worth an endpoint — but if
+// the two drift, the UI offers a "Fix name" button the server then rejects with
+// a 403. test_editable_set_is_unchanged pins the server side.
 const AI_MADE = ['web', 'estimate', 'user'];
 const EDITABLE_SOURCES = AI_MADE;
 
@@ -2231,6 +2235,9 @@ function sourceIcon(source) {
 }
 
 // Which database the *nutrition* came from (foods.source), for transparency.
+// Deliberately worded for a sentence ("Nutrition from your custom food"), so
+// these differ from the server's badge labels in food_sources.py. Same eight
+// keys, different voice.
 const FOOD_SOURCE_LABELS = {
   usda: 'USDA', off: 'Open Food Facts', fatsecret: 'FatSecret',
   user: 'your custom food', recipe: 'your recipe', manual: 'manual entry',

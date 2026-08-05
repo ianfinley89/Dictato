@@ -5,6 +5,7 @@ any other food. Nutrition for recipes is computed from ingredients, never guesse
 import json
 from typing import Optional
 from app.database import get_conn
+from app.services import food_sources
 from app.services.food_lookup import get_food_by_id
 
 _MACROS = ("calories", "protein_g", "carbs_g", "fat_g", "fiber_g")
@@ -71,7 +72,7 @@ def create_user_food(user_id: int, req) -> dict:
 def get_recipe_detail(food_id: int, user_id: int) -> Optional[dict]:
     """A user food plus its ingredient breakdown (for viewing/editing)."""
     food = get_food_by_id(food_id)
-    if not food or food["source"] not in ("user", "recipe"):
+    if not food or food["source"] not in food_sources.AUTHORED:
         return None
     if food.get("created_by_user_id") != user_id:
         return None
@@ -92,7 +93,7 @@ def get_recipe_detail(food_id: int, user_id: int) -> Optional[dict]:
 def delete_user_food(food_id: int, user_id: int) -> str:
     """Returns 'ok', 'not_found', 'forbidden', or 'in_use'."""
     food = get_food_by_id(food_id)
-    if not food or food["source"] not in ("user", "recipe"):
+    if not food or food["source"] not in food_sources.AUTHORED:
         return "not_found"
     if food.get("created_by_user_id") != user_id:
         return "forbidden"

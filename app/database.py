@@ -426,11 +426,13 @@ def _repair_nutrients(conn) -> None:
     now runs on every write, so this only fixes rows cached before it existed.
     Idempotent: only rows the guard actually changes are rewritten."""
     import json
+    from app.services import food_sources
     from app.services.nutrition_guard import sanitize_per_100g
     # Only USDA/OFF are genuine per-100g; other sources encode per-serving values
     # in the per-100g slot and must be left alone.
     rows = conn.execute(
-        "SELECT id, nutrients_json FROM foods WHERE source IN ('usda', 'off')"
+        "SELECT id, nutrients_json FROM foods WHERE source IN "
+        f"({food_sources.sql_list(food_sources.PER_100G)})"
     ).fetchall()
     for r in rows:
         try:

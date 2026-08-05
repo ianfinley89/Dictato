@@ -4,9 +4,13 @@ import re
 from typing import Optional
 from app.config import USDA_API_KEY
 from app.database import get_conn
+from app.services import food_sources
 from app.services.fatsecret import search_fatsecret
 from app.services.nutrition_guard import sanitize_per_100g, KCAL_PER_KJ
 from app.services.portion import parse_usda_portions
+
+_AUTHORED_SQL = food_sources.sql_list(food_sources.AUTHORED)
+_INVENTED_SQL = food_sources.sql_list(food_sources.INVENTED)
 
 USDA_BASE = "https://api.nal.usda.gov/fdc/v1"
 OFF_BASE = "https://world.openfoodfacts.org/cgi/search.pl"
@@ -37,20 +41,11 @@ def _serving_grams(size, unit) -> Optional[float]:
     return round(float(size) * factor, 1) if factor else None
 
 
-# Private to whoever created them (mirrors the privacy filter in _SCOPE_SQL).
-_PRIVATE_SOURCES = ("user", "recipe", "estimate")
-# Foods the user DELIBERATELY made. These outrank reference data for them — a
-# recipe you built is the authority on what you ate.
-#
-# `estimate` is deliberately NOT here. It is the model's labelled last resort,
-# created only when the database had nothing, and treating it as an authored
-# food inverted hard rule #1: "multigrain cereal flakes", invented once at 366.7
-# kcal/100g, came back FIRST for a bare search of "cereal" ever after — above
-# every real USDA row — and its presence also skipped the external lookup that
-# would have replaced it. The rule was enforced when the food was created and
-# then quietly undone every time it was read back.
-_AUTHORED_SOURCES = ("user", "recipe")
-_ESTIMATE_SOURCE = "estimate"
+# What each `source` means — privacy, authority, editability, whether its
+# numbers are per-100g — is declared once in food_sources. It used to be six
+# tuples in five modules with nothing tying them together, which is how
+# `estimate` came to inherit the PRECEDENCE of a user's own recipe from a tuple
+# that only meant to group them by PRIVACY.
 
 
 def _cache_all(items: list[dict]) -> list[dict]:
@@ -108,13 +103,12 @@ async def search_foods(query: str, user_id: int, limit: int = 10, brand: str | N
 
 
 def _is_user_food(food: dict, user_id: int) -> bool:
-    """A food this user authored on purpose — not one the model guessed for them."""
-    return (food.get("source") in _AUTHORED_SOURCES
-            and food.get("created_by_user_id") == user_id)
+    return food_sources.is_authored_by(food, user_id)
 
 
-_SCOPE_SQL = """
-    AND (source NOT IN ('user', 'recipe', 'estimate') OR created_by_user_id = ?)
+_SCOPE_SQL = f"""
+    AND (source NOT IN ({food_sources.sql_list(food_sources.PRIVATE)})
+         OR created_by_user_id = ?)
     AND (expires_at IS NULL OR datetime(expires_at) > datetime('now'))
 """
 
@@ -144,9 +138,9 @@ def _search_local(query: str, user_id: int, limit: int) -> list[dict]:
                         JOIN foods f ON f.id = foods_fts.rowid
                         WHERE foods_fts MATCH ? {_SCOPE_SQL}
                         ORDER BY
-                          CASE WHEN f.source IN ('user','recipe')
+                          CASE WHEN f.source IN ({_AUTHORED_SQL})
                                     AND f.created_by_user_id = ? THEN 0
-                               WHEN f.source = 'estimate' THEN 2
+                               WHEN f.source IN ({_INVENTED_SQL}) THEN 2
                                ELSE 1 END,
                           CASE WHEN lower(f.name) = ? THEN 0
                                WHEN lower(f.name) LIKE ? THEN 1
@@ -163,9 +157,9 @@ def _search_local(query: str, user_id: int, limit: int) -> list[dict]:
                 f"""SELECT * FROM foods
                     WHERE name LIKE ? {_SCOPE_SQL}
                     ORDER BY
-                      CASE WHEN source IN ('user','recipe')
+                      CASE WHEN source IN ({_AUTHORED_SQL})
                                 AND created_by_user_id = ? THEN 0
-                           WHEN source = 'estimate' THEN 2
+                           WHEN source IN ({_INVENTED_SQL}) THEN 2
                            ELSE 1 END,
                       CASE WHEN lower(name) = ?    THEN 0
                            WHEN lower(name) LIKE ? THEN 1
@@ -208,7 +202,7 @@ def _has_strong_local(foods: list[dict], q: str) -> bool:
     the time, so letting it satisfy this test means never going back to ask —
     and the databases keep improving underneath it."""
     return any(_noun_match(_lead_noun(f["name"]), q) for f in foods
-               if f.get("source") != _ESTIMATE_SOURCE)
+               if f.get("source") not in food_sources.INVENTED)
 
 
 # Words too common in food names to prove a result is relevant. "Kodiak protein
@@ -286,10 +280,7 @@ def _source_rank(food: dict) -> int:
     built, then any real database, then — only if nothing else fits — the model's
     own guess. Ranked BELOW reference data, not above it, which is the whole
     point of labelling it an estimate."""
-    src = food.get("source")
-    if src in _AUTHORED_SOURCES:
-        return 0
-    return 2 if src == _ESTIMATE_SOURCE else 1
+    return food_sources.trust(food.get("source"))
 
 
 def _rank_by_relevance(foods: list[dict], query: str) -> list[dict]:
@@ -540,7 +531,7 @@ def _cache_food(food: dict) -> int:
         # Only USDA/OFF carry genuine per-100g energy density; FatSecret encodes
         # per-serving values in the per-100g slot, so it must not be "corrected".
         nutrients_json = food["nutrients_json"]
-        if food.get("source") in ("usda", "off"):
+        if food.get("source") in food_sources.PER_100G:
             try:
                 clean, _ = sanitize_per_100g(json.loads(nutrients_json))
                 nutrients_json = json.dumps(clean)
@@ -654,7 +645,7 @@ async def strong_db_match(name: str, user_id: int) -> Optional[dict]:
         return None
     try:
         for f in await search_foods(name, user_id, limit=6):
-            if f.get("source") in ("user", "recipe", "estimate"):
+            if f.get("source") in food_sources.PRIVATE:
                 continue          # private/AI rows aren't authority over a new one
             if key in (_norm_name(f["name"]), _norm_name(_lead_noun(f["name"]))):
                 return f

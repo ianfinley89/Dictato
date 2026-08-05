@@ -15,8 +15,10 @@ import re
 import statistics
 
 from app.database import get_conn
+from app.services import food_sources
 
-_TRUSTED = ("usda", "off")
+_TRUSTED = food_sources.REFERENCE_STATS   # reference data only: learning
+                                          # from our own guesses is circular
 _MIN_SAMPLES = 5          # fewer than this is anecdote, not a distribution
 _MAX_SPREAD = 1.6         # p75/p25; above this the class has no typical size
 _MIN_G, _MAX_G = 5.0, 1500.0

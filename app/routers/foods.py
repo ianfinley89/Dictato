@@ -6,6 +6,7 @@ from typing import Optional
 from app.auth import get_current_user_id
 from app.services.food_lookup import search_foods, get_food_by_id, _row_to_food
 from app.services import ai
+from app.services import food_sources
 from app.services.ai_usage import check_and_increment
 from app.services.nutrition_guard import sanitize_per_100g
 from app.services.logging import resync_entry_snapshot
@@ -140,7 +141,7 @@ async def edit_food(food_id: int, body: FoodEdit, request: Request):
     food = get_food_by_id(food_id)
     if not food or not _can_access(food_id, uid):
         raise HTTPException(404, "Food not found")
-    if food["source"] not in ("web", "estimate", "user"):
+    if food["source"] not in food_sources.EDITABLE:
         raise HTTPException(
             403, f"{food['source'].upper()} foods are shared reference data and "
                  f"can't be edited. Create your own version instead.")
@@ -190,6 +191,6 @@ def _can_access(food_id: int, uid: int) -> bool:
     food = get_food_by_id(food_id)
     if not food:
         return False
-    if food["source"] in ("user", "recipe", "estimate"):
+    if food["source"] in food_sources.PRIVATE:
         return food.get("created_by_user_id") == uid
     return True

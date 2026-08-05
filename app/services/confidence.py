@@ -22,6 +22,7 @@ it) on the result card. It must fire RARELY or it becomes wallpaper, which is wh
 low-stake captures are never flagged and a merely-bounded estimate is cheap.
 """
 import re
+from app.services import food_sources
 
 # Nothing was logged, or the model asked a question instead of logging: not a
 # judgement call, just a failed capture.
@@ -53,7 +54,7 @@ def _entry_risk(e: dict) -> float:
                 else _RISK_UNANCHORED_ESTIMATE)
     if e.get("portion_snapped"):
         risk += _RISK_SNAPPED
-    if (e.get("food_source_raw") or "") == "estimate":
+    if (e.get("food_source_raw") or "") in food_sources.INVENTED:
         risk += _RISK_INVENTED_NUTRITION
     return min(1.0, risk)
 
