@@ -594,3 +594,86 @@ def test_local_search_sorts_estimates_last(client):
     names = [f["source"] for f in _search_local("cereal flakes", uid, 5)]
     assert names, "expected local hits"
     assert names[-1] == "estimate", f"estimate should sort last, got {names}"
+
+
+# ── Nutrients are matched by USDA's stable ID, not by name ───────────────────
+# Two production bugs were the same bug twice: "Energy" is four different
+# nutrients. Names could not tell them apart; ids can.
+
+def _usda(nutrients, **extra):
+    from app.services.food_lookup import _parse_usda
+    return json.loads(_parse_usda(
+        {"fdcId": 1, "description": "x", "foodNutrients": nutrients, **extra}
+    )["nutrients_json"])
+
+
+def test_kcal_id_beats_the_kilojoule_row_of_the_same_name():
+    """fdc 170393 "Carrots, raw" really does return both, and the kJ row cached
+    the carrot at 173 kcal/100g."""
+    n = _usda([
+        {"nutrientId": 1062, "nutrientName": "Energy", "unitName": "kJ", "value": 173.0},
+        {"nutrientId": 1008, "nutrientName": "Energy", "unitName": "KCAL", "value": 41.0},
+    ])
+    assert n["calories"] == 41.0
+
+
+def test_kilojoules_alone_are_never_read_as_calories():
+    """Not 'prefer kcal' — kJ must never be taken at all, whatever else is
+    missing. Silently accepting it is the 4.184x error."""
+    assert _usda([{"nutrientId": 1062, "nutrientName": "Energy",
+                   "unitName": "kJ", "value": 173.0}])["calories"] == 0.0
+
+
+def test_specific_atwater_factors_beat_general():
+    """Foundation foods carry both; the specific ones are USDA's per-food
+    coefficients. Raw peanuts: 551 specific, 588 general."""
+    n = _usda([
+        {"nutrientId": 2047, "nutrientName": "Energy (Atwater General Factors)",
+         "unitName": "kcal", "value": 588.3},
+        {"nutrientId": 2048, "nutrientName": "Energy (Atwater Specific Factors)",
+         "unitName": "kcal", "value": 550.6},
+    ])
+    assert n["calories"] == pytest.approx(550.6)
+
+
+def test_id_matching_is_order_independent():
+    """The old failure was positional — whichever row landed last, or whichever
+    way string hashing fell. Shuffling the payload must change nothing."""
+    rows = [
+        {"nutrientId": 1062, "nutrientName": "Energy", "unitName": "kJ", "value": 999.0},
+        {"nutrientId": 2047, "nutrientName": "Energy (Atwater General Factors)",
+         "unitName": "kcal", "value": 588.3},
+        {"nutrientId": 1008, "nutrientName": "Energy", "unitName": "KCAL", "value": 41.0},
+        {"nutrientId": 2048, "nutrientName": "Energy (Atwater Specific Factors)",
+         "unitName": "kcal", "value": 550.6},
+    ]
+    for i in range(len(rows)):
+        rotated = rows[i:] + rows[:i]
+        assert _usda(rotated)["calories"] == 41.0, rotated
+
+
+def test_macros_match_by_id_too():
+    n = _usda([
+        {"nutrientId": 1003, "nutrientName": "Protein", "unitName": "G", "value": 0.93},
+        {"nutrientId": 1005, "nutrientName": "Carbohydrate, by difference",
+         "unitName": "G", "value": 9.58},
+        {"nutrientId": 1004, "nutrientName": "Total lipid (fat)", "unitName": "G", "value": 0.24},
+        {"nutrientId": 1079, "nutrientName": "Fiber, total dietary", "unitName": "G", "value": 2.8},
+    ])
+    assert (n["protein_g"], n["carbs_g"], n["fat_g"], n["fiber_g"]) == (0.93, 9.58, 0.24, 2.8)
+
+
+def test_carbohydrate_by_summation_is_not_mistaken_for_by_difference():
+    """1050 is a different nutrient that USDA also calls 'Carbohydrate, ...'."""
+    n = _usda([{"nutrientId": 1050, "nutrientName": "Carbohydrate, by summation",
+                "unitName": "G", "value": 77.0}])
+    assert n["carbs_g"] == 0.0
+
+
+def test_names_still_work_when_a_payload_has_no_ids():
+    """Older captures and hand-built fixtures carry names only."""
+    n = _usda([
+        {"nutrientName": "Energy", "unitName": "KCAL", "value": 88.0},
+        {"nutrientName": "Protein", "unitName": "G", "value": 3.0},
+    ])
+    assert n["calories"] == 88.0 and n["protein_g"] == 3.0

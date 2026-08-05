@@ -46,7 +46,8 @@ def _flatten(item: dict) -> dict:
     kcal, which on a dry run looks exactly like "the whole cache is wrong"."""
     out = dict(item)
     out["foodNutrients"] = [
-        {"nutrientName": (n.get("nutrient") or {}).get("name"),
+        {"nutrientId": (n.get("nutrient") or {}).get("id"),
+         "nutrientName": (n.get("nutrient") or {}).get("name"),
          "unitName": (n.get("nutrient") or {}).get("unitName"),
          "value": n.get("amount")}
         if "nutrient" in n else n

@@ -15,12 +15,23 @@ _INVENTED_SQL = food_sources.sql_list(food_sources.INVENTED)
 USDA_BASE = "https://api.nal.usda.gov/fdc/v1"
 OFF_BASE = "https://world.openfoodfacts.org/cgi/search.pl"
 
-# ORDER MATTERS, so these are tuples. Foundation foods report energy twice —
-# "Energy (Atwater General Factors)" (the flat 4/4/9) and "Energy (Atwater
-# Specific Factors)" (USDA's per-food coefficients, the better number: raw
-# peanuts are 551 kcal/100g specific, 588 general). Iterating a SET picked
-# whichever way string hashing fell that process, so the same food cached at
-# either value on different runs.
+# USDA's nutrient IDs — unique, stable, and the primary key we match on. Names
+# are ambiguous: FOUR distinct nutrients are called "Energy".
+#
+#   1008  Energy                            kcal   <- what we want
+#   1062  Energy                            kJ     <- same name, 4.184x the number
+#   2048  Energy (Atwater Specific Factors) kcal   <- USDA's per-food coefficients
+#   2047  Energy (Atwater General Factors)  kcal   <- the flat 4/4/9
+#
+# ORDER MATTERS in every tuple below: the first one present wins. Specific
+# factors beat general — raw peanuts are 551 kcal/100g specific, 588 general.
+_ENERGY_IDS = (1008, 2048, 2047)
+_PROTEIN_IDS = (1003,)
+_CARB_IDS = (1005,)                   # "by difference", not 1050 "by summation"
+_FAT_IDS = (1004,)
+_FIBER_IDS = (1079,)
+
+# Fallback for payloads carrying no ids. Same declared order.
 _ENERGY_NAMES = ("Energy", "Energy (Atwater Specific Factors)",
                  "Energy (Atwater General Factors)")
 _PROTEIN_NAMES = ("Protein",)
@@ -412,32 +423,59 @@ async def _search_off(query: str, limit: int) -> list[dict]:
 
 
 def _parse_usda(item: dict) -> Optional[dict]:
-    # SR Legacy rows carry TWO nutrients both named "Energy" — one kcal, one kJ.
-    # Keyed by name alone the kJ row wins by arriving last, so a raw carrot was
-    # filed at 173 kcal/100g instead of 41. Read the unit.
-    raw: dict[str, float] = {}
-    for n in item.get("foodNutrients", []):
-        name = n.get("nutrientName")
-        if not name:
-            continue
-        unit = str(n.get("unitName") or "").upper()
-        if name in _ENERGY_NAMES and unit and unit != "KCAL":
-            continue
-        raw.setdefault(name, n.get("value", 0))
+    """Read a USDA food by nutrient ID, falling back to names.
 
-    def pick(names: tuple, default: float = 0.0) -> float:
-        """First name that is present wins — hence the declared order."""
+    Two production bugs came from matching on `nutrientName`, and they were the
+    same bug twice: "Energy" is FOUR different nutrients (1008 kcal, 1062 kJ,
+    2047/2048 the Atwater variants, all kcal). Keyed by name, a raw carrot took
+    the kJ row and cached at 173 kcal/100g, and Foundation foods took whichever
+    Atwater row string-hashing surfaced first, so peanuts cached at 551 or 588
+    depending on the process. Patching those separately (read the unit, order the
+    name tuple) treated symptoms; the IDs are unique and stable, so matching on
+    them makes the whole class impossible.
+
+    Names remain the fallback: they are all some payloads carry, and every test
+    fixture written before this used them."""
+    by_id: dict[int, float] = {}
+    by_name: dict[str, float] = {}
+    for n in item.get("foodNutrients", []):
+        value = n.get("value")
+        nid = n.get("nutrientId")
+        if nid is not None:
+            try:
+                by_id.setdefault(int(nid), value)
+            except (TypeError, ValueError):
+                pass
+        name = n.get("nutrientName")
+        if name:
+            unit = str(n.get("unitName") or "").upper()
+            # The name path cannot tell 1008 from 1062, so it still needs the unit.
+            if name in _ENERGY_NAMES and unit and unit != "KCAL":
+                continue
+            by_name.setdefault(name, value)
+
+    def pick(ids: tuple, names: tuple, default: float = 0.0) -> float:
+        """First declared id present wins; then first declared name."""
+        for i in ids:
+            if i in by_id:
+                try:
+                    return float(by_id[i])
+                except (TypeError, ValueError):
+                    pass
         for name in names:
-            if name in raw:
-                return float(raw[name])
+            if name in by_name:
+                try:
+                    return float(by_name[name])
+                except (TypeError, ValueError):
+                    pass
         return default
 
     nutrients = {
-        "calories": pick(_ENERGY_NAMES),
-        "protein_g": pick(_PROTEIN_NAMES),
-        "carbs_g": pick(_CARB_NAMES),
-        "fat_g": pick(_FAT_NAMES),
-        "fiber_g": pick(_FIBER_NAMES),
+        "calories": pick(_ENERGY_IDS, _ENERGY_NAMES),
+        "protein_g": pick(_PROTEIN_IDS, _PROTEIN_NAMES),
+        "carbs_g": pick(_CARB_IDS, _CARB_NAMES),
+        "fat_g": pick(_FAT_IDS, _FAT_NAMES),
+        "fiber_g": pick(_FIBER_IDS, _FIBER_NAMES),
         "micros": {},
     }
     serving = item.get("servingSize")
