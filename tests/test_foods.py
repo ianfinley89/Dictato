@@ -519,3 +519,78 @@ def test_merge_usda_keeps_a_candidate_pool_for_the_ranker():
     merged = _merge_usda(generic, relevance, "mashed potatoes", 24)
     assert len(merged) == 11
     assert any("Potato, mashed" in m["description"] for m in merged)
+
+
+# ── An AI estimate must never outrank real data ──────────────────────────────
+# `create_food` may mint nutrition only as a labelled last resort, when no
+# database had the food. Nothing stopped that guess from then winning every
+# future search: "multigrain cereal flakes", invented once at 366.7 kcal/100g,
+# came back FIRST for a bare search of "cereal" ever after — above every USDA
+# row — and its presence also skipped the lookup that would have replaced it.
+# Hard rule #1 was enforced on write and undone on every read.
+
+def _seed_estimate(name: str, uid: int, calories: float = 366.7) -> int:
+    with get_conn() as conn:
+        cur = conn.execute(
+            """INSERT INTO foods (source, name, nutrients_json, created_by_user_id)
+               VALUES ('estimate', ?, ?, ?)""",
+            (name, json.dumps({"calories": calories, "protein_g": 10.0,
+                               "carbs_g": 83.3, "fat_g": 3.3}), uid))
+        return cur.lastrowid
+
+
+def test_estimate_ranks_below_real_data():
+    from app.services.food_lookup import _rank_by_relevance
+    out = _rank_by_relevance([
+        {"name": "multigrain cereal flakes", "source": "estimate",
+         "nutrients_per_100g": {"calories": 366.7}},
+        {"name": "Cereal, Wheat Flakes", "source": "usda",
+         "nutrients_per_100g": {"calories": 359.0}},
+    ], "cereal flakes")
+    assert out[0]["source"] == "usda"
+
+
+def test_authored_food_still_outranks_everything():
+    """The behaviour this shares code with, and must not lose: a recipe you
+    built yourself IS the authority on what you ate."""
+    from app.services.food_lookup import _rank_by_relevance
+    out = _rank_by_relevance([
+        {"name": "Cereal, Wheat Flakes", "source": "usda",
+         "nutrients_per_100g": {"calories": 359.0}},
+        {"name": "Cereal my way", "source": "recipe",
+         "nutrients_per_100g": {"calories": 300.0}},
+    ], "cereal")
+    assert out[0]["source"] == "recipe"
+
+
+def test_estimate_is_not_treated_as_an_authored_food(client):
+    """It must not short-circuit the external lookup. The estimate exists
+    BECAUSE the databases had nothing then; letting it stand in for them means
+    never asking again, while they keep improving."""
+    from app.services.food_lookup import _is_user_food
+    uid = client.post("/api/auth/register", json=REG).json()["user_id"]
+    est = {"source": "estimate", "created_by_user_id": uid}
+    assert _is_user_food(est, uid) is False
+    assert _is_user_food({"source": "recipe", "created_by_user_id": uid}, uid) is True
+    assert _is_user_food({"source": "user", "created_by_user_id": uid}, uid) is True
+    assert est["created_by_user_id"] == uid          # still theirs, still private
+    _seed_estimate("private guess", uid)
+
+
+def test_estimate_does_not_satisfy_the_strong_local_match(client):
+    from app.services.food_lookup import _has_strong_local
+    guess = [{"name": "Cereal", "source": "estimate"}]
+    assert _has_strong_local(guess, "cereal") is False
+    real = [{"name": "Cereal", "source": "usda"}]
+    assert _has_strong_local(real, "cereal") is True
+
+
+def test_local_search_sorts_estimates_last(client):
+    """End to end through the real query, not just the comparator."""
+    uid = client.post("/api/auth/register", json=REG).json()["user_id"]
+    _seed_estimate("cereal flakes", uid)
+    _seed_food("Cereal, Wheat Flakes", calories=359.0)
+    from app.services.food_lookup import _search_local
+    names = [f["source"] for f in _search_local("cereal flakes", uid, 5)]
+    assert names, "expected local hits"
+    assert names[-1] == "estimate", f"estimate should sort last, got {names}"

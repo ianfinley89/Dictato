@@ -37,7 +37,20 @@ def _serving_grams(size, unit) -> Optional[float]:
     return round(float(size) * factor, 1) if factor else None
 
 
-_USER_SOURCES = ("user", "recipe", "estimate")
+# Private to whoever created them (mirrors the privacy filter in _SCOPE_SQL).
+_PRIVATE_SOURCES = ("user", "recipe", "estimate")
+# Foods the user DELIBERATELY made. These outrank reference data for them — a
+# recipe you built is the authority on what you ate.
+#
+# `estimate` is deliberately NOT here. It is the model's labelled last resort,
+# created only when the database had nothing, and treating it as an authored
+# food inverted hard rule #1: "multigrain cereal flakes", invented once at 366.7
+# kcal/100g, came back FIRST for a bare search of "cereal" ever after — above
+# every real USDA row — and its presence also skipped the external lookup that
+# would have replaced it. The rule was enforced when the food was created and
+# then quietly undone every time it was read back.
+_AUTHORED_SOURCES = ("user", "recipe")
+_ESTIMATE_SOURCE = "estimate"
 
 
 def _cache_all(items: list[dict]) -> list[dict]:
@@ -95,7 +108,9 @@ async def search_foods(query: str, user_id: int, limit: int = 10, brand: str | N
 
 
 def _is_user_food(food: dict, user_id: int) -> bool:
-    return food.get("source") in _USER_SOURCES and food.get("created_by_user_id") == user_id
+    """A food this user authored on purpose — not one the model guessed for them."""
+    return (food.get("source") in _AUTHORED_SOURCES
+            and food.get("created_by_user_id") == user_id)
 
 
 _SCOPE_SQL = """
@@ -129,7 +144,10 @@ def _search_local(query: str, user_id: int, limit: int) -> list[dict]:
                         JOIN foods f ON f.id = foods_fts.rowid
                         WHERE foods_fts MATCH ? {_SCOPE_SQL}
                         ORDER BY
-                          CASE WHEN f.created_by_user_id = ? THEN 0 ELSE 1 END,
+                          CASE WHEN f.source IN ('user','recipe')
+                                    AND f.created_by_user_id = ? THEN 0
+                               WHEN f.source = 'estimate' THEN 2
+                               ELSE 1 END,
                           CASE WHEN lower(f.name) = ? THEN 0
                                WHEN lower(f.name) LIKE ? THEN 1
                                ELSE 2 END,
@@ -145,7 +163,10 @@ def _search_local(query: str, user_id: int, limit: int) -> list[dict]:
                 f"""SELECT * FROM foods
                     WHERE name LIKE ? {_SCOPE_SQL}
                     ORDER BY
-                      CASE WHEN created_by_user_id = ? THEN 0 ELSE 1 END,
+                      CASE WHEN source IN ('user','recipe')
+                                AND created_by_user_id = ? THEN 0
+                           WHEN source = 'estimate' THEN 2
+                           ELSE 1 END,
                       CASE WHEN lower(name) = ?    THEN 0
                            WHEN lower(name) LIKE ? THEN 1
                            ELSE 2 END,
@@ -181,8 +202,13 @@ def _is_strong_generic(item: dict, q: str) -> bool:
 
 def _has_strong_local(foods: list[dict], q: str) -> bool:
     """True if a cached food's lead noun matches the query — i.e. the cache really
-    has *this* food, not just something containing the word."""
-    return any(_noun_match(_lead_noun(f["name"]), q) for f in foods)
+    has *this* food, not just something containing the word.
+
+    An AI estimate never counts. It exists because the databases had nothing at
+    the time, so letting it satisfy this test means never going back to ask —
+    and the databases keep improving underneath it."""
+    return any(_noun_match(_lead_noun(f["name"]), q) for f in foods
+               if f.get("source") != _ESTIMATE_SOURCE)
 
 
 # Words too common in food names to prove a result is relevant. "Kodiak protein
@@ -255,6 +281,17 @@ def relevance_score(foods: list[dict], query: str) -> float:
     return sum(1 for t in tokens if _covers(hay, t)) / len(tokens)
 
 
+def _source_rank(food: dict) -> int:
+    """Who to believe when two rows match the query equally well: a food the user
+    built, then any real database, then — only if nothing else fits — the model's
+    own guess. Ranked BELOW reference data, not above it, which is the whole
+    point of labelling it an estimate."""
+    src = food.get("source")
+    if src in _AUTHORED_SOURCES:
+        return 0
+    return 2 if src == _ESTIMATE_SOURCE else 1
+
+
 def _rank_by_relevance(foods: list[dict], query: str) -> list[dict]:
     """Stable sort putting results that match more of the query first.
 
@@ -302,7 +339,7 @@ def _rank_by_relevance(foods: list[dict], query: str) -> list[dict]:
         hits = sum(1 for t in tokens if _covers(hay, t))
         branded = 1 if (f.get("brand") and not named_brand) else 0
         off_head = 0 if _noun_match(_lead_noun(name), head) else 1
-        return (-hits, branded, off_head, len(name))
+        return (-hits, _source_rank(f), branded, off_head, len(name))
 
     return sorted(foods, key=score)
 
