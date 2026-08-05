@@ -844,6 +844,11 @@ function mealOf(eatenAt) {
 // "45g" is hard to picture; the food's own household serving usually isn't.
 // Returns "≈ 5 cakes", "≈ 1.9 cups (240ml)", "≈ 300 ml", "≈ 2 × 3 cookies",
 // or '' when the food has no usable serving info (or it would just repeat grams).
+// USDA serving descriptions are usually a SIZE, not a noun: "1 large" (egg),
+// "1 medium" (apple). Pluralising the first word turned those into "2.3 larges".
+const SIZE_WORDS = new Set(['large', 'small', 'medium', 'extra', 'jumbo', 'mini',
+  'regular', 'giant', 'tiny', 'whole', 'half', 'thick', 'thin']);
+
 function servingEquiv(qtyG, servingG, desc) {
   if (!servingG || servingG <= 0 || !desc) return '';
   const d = String(desc).trim();
@@ -862,7 +867,9 @@ function servingEquiv(qtyG, servingG, desc) {
   if (one) {
     let unit = one[1];
     if (nice !== '1') {
-      unit = unit.replace(/^([A-Za-z]+)/, w => (/(s|x|z|ch|sh)$/i.test(w) ? w + 'es' : w + 's'));
+      unit = unit.replace(/^([A-Za-z]+)/, w =>
+        SIZE_WORDS.has(w.toLowerCase()) ? w
+          : (/(s|x|z|ch|sh)$/i.test(w) ? w + 'es' : w + 's'));
     }
     return `≈ ${nice} ${unit}`;
   }
