@@ -149,3 +149,41 @@ def test_openai_messages_plain_user_and_assistant():
     ])
     assert out[1] == {"role": "user", "content": "hello"}
     assert out[2] == {"role": "assistant", "content": "hi"}
+
+
+# ── web_search maps to whatever the endpoint runs natively ───────────────────
+def test_openrouter_gets_its_native_web_search_tool():
+    """OpenRouter's wire format is a `type` entry in the tools array, resolved
+    server-side — not a function the client executes."""
+    from app.services.llm import _openai_tools
+    out = _openai_tools([{"server_tool": "web_search", "max_uses": 3}],
+                        "https://openrouter.ai/api/v1")
+    assert out == [{"type": "openrouter:web_search",
+                    "parameters": {"max_results": 5, "max_total_results": 10}}]
+
+
+def test_plain_openai_endpoint_still_drops_it():
+    """Ollama/vLLM have no equivalent; emitting an unknown `type` would 400."""
+    from app.services.llm import _openai_tools
+    assert _openai_tools([{"server_tool": "web_search"}], "http://localhost:11434/v1") == []
+
+
+def test_ordinary_tools_are_unaffected_on_both():
+    from app.services.llm import _openai_tools
+    t = {"name": "log_food", "description": "d", "input_schema": {"type": "object"}}
+    for base in ("https://openrouter.ai/api/v1", "http://localhost:11434/v1"):
+        out = _openai_tools([t], base)
+        assert out[-1]["function"]["name"] == "log_food"
+
+
+def test_supports_server_web_search_by_provider(monkeypatch):
+    from app.services import llm
+    monkeypatch.setattr(llm, "_resolve_feature",
+                        lambda f: ("anthropic", "m", "", "k"))
+    assert llm.supports_server_web_search("voice") is True
+    monkeypatch.setattr(llm, "_resolve_feature",
+                        lambda f: ("openai", "m", "https://openrouter.ai/api/v1", "k"))
+    assert llm.supports_server_web_search("voice") is True
+    monkeypatch.setattr(llm, "_resolve_feature",
+                        lambda f: ("openai", "m", "http://localhost:11434/v1", "k"))
+    assert llm.supports_server_web_search("voice") is False

@@ -33,18 +33,22 @@ from app.services.voice_parse import parse_local
 MAX_TURNS = 8
 _MAX_NOTE = 200
 
-# Anthropic-only server-side search; the llm layer drops it on other providers.
+# Provider-native web search. The llm layer maps this to Anthropic's server tool
+# or OpenRouter's `openrouter:web_search`, so on both the searching happens at
+# the provider already in use.
 _WEB_SEARCH_TOOL = {"server_tool": "web_search", "max_uses": 3}
 _MAX_WEB_LOOKUPS = 3      # matches the server tool's max_uses
 
-# The stand-in for providers that have no server-side search. Same NAME, so the
-# system prompt's instructions about web_search apply either way — but this one
-# is executed here, by the Anthropic-backed nutrition lookup in ai.py.
+# Last resort, for an endpoint with no web search of its own (Ollama, vLLM, a
+# local Gemma). Same NAME as the server tool, so the system prompt's web_search
+# guidance applies either way — but this one is executed here, and it phones
+# Anthropic, so a "local model" setup is not fully self-contained. Providers that
+# CAN search themselves never see it.
 #
-# Without it a non-Anthropic model had no web tool at all, so the only remaining
-# move for a dish no database carried was to invent a labelled estimate. That is
-# how one cached "multigrain cereal flakes" came to exist, and it then outranked
-# every USDA row until the source registry demoted it.
+# Something must exist here: without any web tool the only remaining move for a
+# dish no database carried was to invent a labelled estimate. That is how one
+# cached "multigrain cereal flakes" came to exist, and it then outranked every
+# USDA row until the source registry demoted it.
 _WEB_LOOKUP_TOOL = {
     "name": "web_search",
     "description": (
@@ -673,10 +677,12 @@ async def run_agent(user_id: int, *, text: str | None = None,
         system += _PHOTO_HINT
     # Route photo captures to the vision model, voice/text to the text model.
     feature = "photo" if image else "voice"
-    # Anthropic runs web search server-side; everyone else gets the client-side
-    # equivalent, so no provider is left without a way to research a dish.
+    # Anthropic and OpenRouter both run web search themselves, so the model gets
+    # real grounding at the provider already in use. Only an endpoint with no
+    # equivalent (Ollama/vLLM/local) falls back to the client-side tool, which
+    # phones Anthropic — a dependency worth avoiding when the provider can do it.
     try:
-        server_side_search = llm._resolve_feature(feature)[0] == "anthropic"
+        server_side_search = llm.supports_server_web_search(feature)
     except Exception:
         server_side_search = True
     web_tool = _WEB_SEARCH_TOOL if server_side_search else _WEB_LOOKUP_TOOL

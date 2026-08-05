@@ -86,14 +86,15 @@ Caveats learned by measuring, not guessing:
 
 - **The agent is tool-driven** — the model must support tool calling. Gemini's
   `-image` variants do *not* (they're image-generation) and fail outright.
-- **`web_search` works everywhere, but differently.** On Anthropic the agent
-  uses the server-side tool. On any other provider it gets a client-side
-  `web_search` that runs the same Anthropic-backed nutrition lookup `ai.py`
-  uses — so a non-Anthropic `PHOTO_MODEL`/`VOICE_MODEL` still bills a little
-  Anthropic when, and only when, no database has the food. Before this, those
-  providers had no web tool at all and the model's only remaining option was to
-  invent a labelled estimate; that is exactly how one cached "multigrain cereal
-  flakes" came to exist.
+- **`web_search` works on every provider**, under that one name, but is backed
+  differently: Anthropic's server tool, or OpenRouter's `openrouter:web_search`
+  (billed by OpenRouter at ~$4/1000 results — capped here at 5 per search, 10
+  per capture). An endpoint with neither, such as Ollama or vLLM, falls back to
+  a client-side tool that calls the Anthropic-backed lookup in `ai.py`, so a
+  purely local setup still needs a little Anthropic credit for this one thing.
+  Before this, non-Anthropic providers had no web tool at all and the model's
+  only remaining option was to invent a labelled estimate — that is exactly how
+  one cached "multigrain cereal flakes" came to exist.
 - **Cheap ≠ equivalent.** On the 41-dish Menu-Match eval, `gpt-oss-120b` (27×
   cheaper) logged one pizza order as three entries — 513% calorie error — and
   `qwen3.5-flash` matched Claude on mean error but invented nutrition 8× where

@@ -14,8 +14,12 @@ Callers work in a small *neutral* format and never touch a provider SDK:
 `LLM_PROVIDER=anthropic` (default) uses the Anthropic SDK — identical behavior to
 before, including the server-side web_search tool. `LLM_PROVIDER=openai` routes
 through any OpenAI-compatible endpoint (OpenRouter for DeepSeek/Qwen/Gemini, or a
-local Ollama/vLLM server for Gemma); the web_search server tool is dropped there,
-since it has no OpenAI-format equivalent.
+local Ollama/vLLM server for Gemma).
+
+A `{"server_tool": "web_search"}` entry is translated to whatever the endpoint
+runs natively: Anthropic's server tool, or OpenRouter's `openrouter:web_search`.
+An endpoint with neither (Ollama, vLLM) drops it, and the caller supplies its own
+— see `supports_server_web_search`.
 """
 import json
 import time
@@ -243,11 +247,42 @@ async def _chat_anthropic(feature, system, messages, tools, max_tokens):
 
 # ── OpenAI-compatible (OpenRouter / Ollama / vLLM / DeepSeek / Qwen / …) ──────
 
-def _openai_tools(tools):
+def _is_openrouter(base_url: str) -> bool:
+    b = (base_url or "").lower()
+    return "openrouter.ai" in b or (bool(config.OPENROUTER_BASE_URL)
+                                    and base_url == config.OPENROUTER_BASE_URL)
+
+
+def supports_server_web_search(feature: str) -> bool:
+    """Does this feature's provider run web search ITSELF?
+
+    Anthropic and OpenRouter both do. A bare OpenAI-compatible endpoint (Ollama,
+    vLLM, a local Gemma) does not, and callers must supply their own tool — see
+    agent._WEB_LOOKUP_TOOL."""
+    kind, _model, base, _key = _resolve_feature(feature)
+    return kind == "anthropic" or _is_openrouter(base)
+
+
+# Web results are billed per result ($4/1000 at OpenRouter), which is real money
+# next to a ~$0.03 capture. Keep the cap tight; raise it only with a measurement.
+_OR_MAX_RESULTS = 5
+_OR_MAX_TOTAL_RESULTS = 10
+
+
+def _openai_tools(tools, base_url: str = ""):
     out = []
     for t in tools or []:
+        if t.get("server_tool") == "web_search":
+            # OpenRouter runs search itself, so the model gets real web grounding
+            # at the provider it is already using — no round trip to Anthropic.
+            # Anything else openai-compatible has no equivalent and drops it.
+            if _is_openrouter(base_url):
+                out.append({"type": "openrouter:web_search",
+                            "parameters": {"max_results": _OR_MAX_RESULTS,
+                                           "max_total_results": _OR_MAX_TOTAL_RESULTS}})
+            continue
         if t.get("server_tool"):
-            continue   # server-side tools (web_search) are Anthropic-only
+            continue
         out.append({"type": "function", "function": {
             "name": t["name"], "description": t["description"], "parameters": t["input_schema"]}})
     return out
@@ -280,7 +315,7 @@ async def _chat_openai(feature, system, messages, tools, max_tokens):
     from openai import AsyncOpenAI
     _kind, model, base_url, api_key = _resolve_feature(feature)
     client = AsyncOpenAI(base_url=base_url or None, api_key=api_key or "none")
-    otools = _openai_tools(tools)
+    otools = _openai_tools(tools, base_url)
     kwargs = dict(model=model, max_tokens=max_tokens,
                   messages=_openai_messages(system, messages))
     if otools:
