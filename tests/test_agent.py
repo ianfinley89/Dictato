@@ -1094,3 +1094,92 @@ def test_mic_peak_is_optional(client, monkeypatch):
     _no_external(monkeypatch)
     _knows_food(uid, _seed_food(name="apple", serving_g=180.0))
     assert client.post("/api/agent/log", data={"text": "an apple"}).status_code == 200
+
+
+# ── web_search on providers that have no server-side tool ────────────────────
+def _tools_run_agent_builds(monkeypatch, provider, uid):
+    """The tool list run_agent ACTUALLY passes to llm.chat.
+
+    Rebuilding the selection logic in the test would only prove the copy agrees
+    with itself; capture the real call instead."""
+    from app.services import agent as ag, llm
+    monkeypatch.setattr(llm, "_resolve_feature",
+                        lambda f: (provider, "some-model", "u", "k"))
+    seen = {}
+
+    async def capture(**kwargs):
+        seen["tools"] = kwargs["tools"]
+        return _text("done")
+
+    monkeypatch.setattr(llm, "chat", capture)
+    asyncio.run(ag.run_agent(uid, text="an apple", image=None,
+                             image_media_type=None, method="voice"))
+    return seen["tools"]
+
+
+def test_anthropic_gets_the_server_side_search_tool(client, monkeypatch):
+    """On Anthropic the model never sees the client-side schema — the server
+    tool is better and the llm layer already handles it."""
+    from app.services import agent as ag
+    tools = _tools_run_agent_builds(monkeypatch, "anthropic", _register(client))
+    assert ag._WEB_SEARCH_TOOL in tools
+    assert ag._WEB_LOOKUP_TOOL not in tools
+
+
+def test_other_providers_get_a_client_side_web_search(client, monkeypatch):
+    """Without this a non-Anthropic model has NO web tool, so the only move left
+    for a dish no database carries is to invent a labelled estimate."""
+    from app.services import agent as ag
+    tools = _tools_run_agent_builds(monkeypatch, "openai", _register(client))
+    assert ag._WEB_LOOKUP_TOOL in tools
+    assert ag._WEB_SEARCH_TOOL not in tools
+    # Same NAME either way, so the system prompt's web_search guidance still applies.
+    assert ag._WEB_LOOKUP_TOOL["name"] == "web_search"
+
+
+def test_web_search_result_is_shaped_for_create_food(client, monkeypatch):
+    uid = _register(client)
+    from app.services import agent as ag, ai
+    async def fake(name, brand, user_id):
+        return {"found": True, "name": "Panang Curry", "serving": "1 bowl (350g)",
+                "calories": 480.0, "protein_g": 22.0, "carbs_g": 30.0, "fat_g": 30.0,
+                "source_url": "https://example.com/menu"}
+    monkeypatch.setattr(ai, "lookup_nutrition_web", fake)
+    out = asyncio.run(ag._execute_tool("web_search", {"query": "panang curry"},
+                                       uid, "voice", None, [], {}, web_uses=[]))
+    assert out["found"] is True
+    # create_food needs exactly these to record source='web' rather than downgrade
+    # the food to an estimate.
+    assert out["values_per"] == "serving"
+    assert out["source_url"] == "https://example.com/menu"
+    for k in ("calories", "protein_g", "carbs_g", "fat_g"):
+        assert k in out
+
+
+def test_web_search_is_capped_like_the_server_tool(client, monkeypatch):
+    """The server tool has max_uses=3; the client one bills a real Anthropic
+    call per use, so it must not be unbounded."""
+    uid = _register(client)
+    from app.services import agent as ag, ai
+    calls = []
+    async def fake(name, brand, user_id):
+        calls.append(name)
+        return {"found": False}
+    monkeypatch.setattr(ai, "lookup_nutrition_web", fake)
+    uses = []
+    for _ in range(5):
+        out = asyncio.run(ag._execute_tool("web_search", {"query": "x"}, uid,
+                                           "voice", None, [], {}, web_uses=uses))
+    assert len(calls) == ag._MAX_WEB_LOOKUPS
+    assert "limit reached" in out["error"]
+
+
+def test_web_search_failure_does_not_kill_the_capture(client, monkeypatch):
+    uid = _register(client)
+    from app.services import agent as ag, ai
+    async def boom(name, brand, user_id):
+        raise RuntimeError("no credit")
+    monkeypatch.setattr(ai, "lookup_nutrition_web", boom)
+    out = asyncio.run(ag._execute_tool("web_search", {"query": "x"}, uid,
+                                       "voice", None, [], {}, web_uses=[]))
+    assert "unavailable" in out["error"]

@@ -35,6 +35,35 @@ _MAX_NOTE = 200
 
 # Anthropic-only server-side search; the llm layer drops it on other providers.
 _WEB_SEARCH_TOOL = {"server_tool": "web_search", "max_uses": 3}
+_MAX_WEB_LOOKUPS = 3      # matches the server tool's max_uses
+
+# The stand-in for providers that have no server-side search. Same NAME, so the
+# system prompt's instructions about web_search apply either way — but this one
+# is executed here, by the Anthropic-backed nutrition lookup in ai.py.
+#
+# Without it a non-Anthropic model had no web tool at all, so the only remaining
+# move for a dish no database carried was to invent a labelled estimate. That is
+# how one cached "multigrain cereal flakes" came to exist, and it then outranked
+# every USDA row until the source registry demoted it.
+_WEB_LOOKUP_TOOL = {
+    "name": "web_search",
+    "description": (
+        "Look up PUBLISHED nutrition facts on the web for a food no database has. "
+        "Returns per-SERVING numbers and the source URL. Pass that url straight to "
+        "create_food(basis='web', source_url=...) — without a real url the food is "
+        "recorded as an estimate instead. Use only after search_food_db has failed."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "query": {"type": "string",
+                      "description": "the dish or product, e.g. 'panang curry'"},
+            "brand": {"type": "string",
+                      "description": "restaurant or brand if the user named one"},
+        },
+        "required": ["query"],
+    },
+}
 
 _SEARCH_TOOL = {
     "name": "search_food_db",
@@ -502,7 +531,8 @@ async def _execute_tool(name: str, inp: dict, user_id: int, method: str,
                         existing_food_ids: dict | None = None,
                         corrections: list | None = None,
                         nutrition_warnings: dict | None = None,
-                        offered_ids: set | None = None) -> dict:
+                        offered_ids: set | None = None,
+                        web_uses: list | None = None) -> dict:
     # In a follow-up ("that was wrong — it was a bottle, not a litre") the tools
     # the model reaches for ARE the correction taxonomy: what it changed says what
     # was wrong. Deterministic, no self-report, no extra tokens.
@@ -511,6 +541,29 @@ async def _execute_tool(name: str, inp: dict, user_id: int, method: str,
     def _corr(kind: str) -> None:
         if revising and corrections is not None and kind not in corrections:
             corrections.append(kind)
+
+    if name == "web_search":
+        # Only reachable on providers without a server-side search tool; on
+        # Anthropic the model never sees this schema.
+        query = (inp.get("query") or "").strip()
+        if not query:
+            return {"error": "query is required"}
+        if web_uses is not None and len(web_uses) >= _MAX_WEB_LOOKUPS:
+            return {"error": "web lookup limit reached — use create_food with "
+                             "basis='estimate' or log what you already found"}
+        if web_uses is not None:
+            web_uses.append(query)
+        from app.services.ai import lookup_nutrition_web
+        try:
+            found = await lookup_nutrition_web(query, (inp.get("brand") or None), user_id)
+        except Exception as e:
+            return {"error": f"web lookup unavailable ({type(e).__name__})"}
+        if not found.get("found"):
+            return {"found": False,
+                    "note": "nothing published found — estimate it with create_food"}
+        # Shaped to be handed straight to create_food: same field names, and
+        # values_per='serving' because that is what published labels quote.
+        return {"found": True, "values_per": "serving", **found}
 
     if name == "search_food_db":
         query = (inp.get("query") or "").strip()
@@ -618,7 +671,17 @@ async def run_agent(user_id: int, *, text: str | None = None,
               + context_text)
     if image:
         system += _PHOTO_HINT
-    tools = [_SEARCH_TOOL, _CREATE_TOOL, _LOG_TOOL, _ANNOTATE_TOOL, _WEB_SEARCH_TOOL]
+    # Route photo captures to the vision model, voice/text to the text model.
+    feature = "photo" if image else "voice"
+    # Anthropic runs web search server-side; everyone else gets the client-side
+    # equivalent, so no provider is left without a way to research a dish.
+    try:
+        server_side_search = llm._resolve_feature(feature)[0] == "anthropic"
+    except Exception:
+        server_side_search = True
+    web_tool = _WEB_SEARCH_TOOL if server_side_search else _WEB_LOOKUP_TOOL
+    tools = [_SEARCH_TOOL, _CREATE_TOOL, _LOG_TOOL, _ANNOTATE_TOOL, web_tool]
+    web_uses = []
     existing_food_ids = None
     if revision:
         prior = [{"entry_id": e["id"], "name": e["food_name"],
@@ -637,8 +700,6 @@ async def run_agent(user_id: int, *, text: str | None = None,
     nutrition_warnings: dict[int, str] = {}
     summary = ""
 
-    # Route photo captures to the vision model, voice/text to the text model.
-    feature = "photo" if image else "voice"
     error = False
     for turn in range(MAX_TURNS):
         try:
@@ -664,7 +725,8 @@ async def run_agent(user_id: int, *, text: str | None = None,
         for tc in resp.tool_calls:
             out = await _execute_tool(tc.name, tc.input, user_id, method, note,
                                       logged, annotation, existing_food_ids,
-                                      corrections, nutrition_warnings, offered_ids)
+                                      corrections, nutrition_warnings, offered_ids,
+                                      web_uses)
             results.append({"id": tc.id, "name": tc.name, "content": json.dumps(out)})
         if not results:
             break

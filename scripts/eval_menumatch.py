@@ -11,8 +11,11 @@ Orange chicken at an asian restaurant") and run it through the production
 `agent.run_agent`, then measure:
   - SOURCE DISTRIBUTION — does the fallback activate here (web/estimate/non-USDA)
     where it stayed dormant on Nutrition5k? This is the primary signal.
-  - rule-#1 SUSPECTS — web/estimate entries that search_foods() shows had a real
-    DB candidate (invented-when-groundable).
+  - rule-#1 SUSPECTS — web/estimate entries logged while search_food_db had
+    ALREADY SHOWN the model a real DB candidate (invented-when-groundable).
+    Read from the recorded tool results, not by re-querying: a re-query uses
+    whichever search the running code has, so an A/B that changes search moves
+    this metric's denominator and the two arms stop being comparable.
   - calorie error vs the dietitian ground truth (SECONDARY + noisy: restaurant
     portions vary hugely, and a generic lookup legitimately differs from one
     restaurant's specific serving — read the trend, not any single dish).
@@ -105,13 +108,61 @@ async def baseline_estimate(transcript: str) -> float | None:
         return None
 
 
-async def probe_db_candidates(name: str, uid: int) -> list[str]:
-    from app.services.food_lookup import search_foods
+def _trace_high_water() -> int:
+    """Highest model_trace id before an item runs, so its own calls can be found."""
+    from app.database import get_conn
     try:
-        hits = await search_foods(name, uid, limit=5)
-        return [f"{h['name']} [{h['source']}]" for h in hits if h["source"] in DB_SOURCES][:3]
+        with get_conn() as conn:
+            return conn.execute("SELECT COALESCE(MAX(id), 0) FROM model_traces").fetchone()[0]
+    except Exception:
+        return 0
+
+
+def candidates_the_model_saw(since_id: int) -> list[str]:
+    """DB candidates `search_food_db` actually returned to the model this item.
+
+    NOT a re-query. The previous version called `search_foods` again at scoring
+    time, which meant each arm of an A/B probed with ITS OWN search — so widening
+    the candidate pool made the probe surface candidates it used to miss, and the
+    suspect count rose from 2 to 6 while the agent behaved no differently. The
+    denominator moved because of the change being measured.
+
+    Reading the tool results answers the question rule #1 actually asks: the
+    model held a real database candidate and chose to invent anyway. That is
+    independent of how search is implemented, so it stays comparable across
+    versions."""
+    from app.database import get_conn
+    seen, out = set(), []
+    try:
+        with get_conn() as conn:
+            rows = conn.execute(
+                "SELECT request_json FROM model_traces WHERE id > ? ORDER BY id",
+                (since_id,)).fetchall()
     except Exception:
         return []
+    for r in rows:
+        try:
+            req = json.loads(r["request_json"] or "{}")
+        except (TypeError, ValueError):
+            continue
+        for m in req.get("messages") or []:
+            if m.get("role") != "tool":
+                continue
+            for res in m.get("results") or []:
+                if res.get("name") != "search_food_db":
+                    continue
+                try:
+                    payload = json.loads(res.get("content") or "{}")
+                except (TypeError, ValueError):
+                    continue
+                for c in payload.get("candidates") or []:
+                    if c.get("source") not in DB_SOURCES:
+                        continue
+                    key = f"{c.get('name')} [{c.get('source')}]"
+                    if key not in seen:
+                        seen.add(key)
+                        out.append(key)
+    return out
 
 
 async def run_item(uid: int, item: dict) -> dict:
@@ -122,6 +173,7 @@ async def run_item(uid: int, item: dict) -> dict:
            "tag": RUN_TAG, "model": llm._resolve_feature("voice")[1]}
     row["baseline_cal"] = await baseline_estimate(transcript)
 
+    since = _trace_high_water()
     t0 = time.time()
     try:
         result = await asyncio.wait_for(
@@ -145,12 +197,12 @@ async def run_item(uid: int, item: dict) -> dict:
         s = e.get("food_source_raw") or "?"
         src[s] = src.get(s, 0) + 1
     row["sources"] = src
+    shown = candidates_the_model_saw(since)
     suspects = []
     for e in entries:
         if e.get("food_source_raw") in ("web", "estimate"):
-            cands = await probe_db_candidates(e.get("food_name") or "", uid)
             suspects.append({"food": e.get("food_name"), "tier": e.get("food_source_raw"),
-                             "db_candidates": cands})
+                             "db_candidates": shown[:3]})
     if suspects:
         row["fallback_probe"] = suspects
     return row
