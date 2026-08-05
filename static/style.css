@@ -1036,7 +1036,11 @@ button:focus-visible, input:focus-visible, .chip:focus-visible {
   animation: fade-slide-in 0.3s ease both;
 }
 
-.result-entry-info { flex: 1; min-width: 0; }
+/* The name and meta take a full row of their own, so the actions wrap beneath.
+   There are four of them now (Portion / Fix name / Adjust / Undo) and the app is
+   capped at 508px, so sharing one row left the food name a few characters wide —
+   and with the polaroid floated alongside, almost nothing. */
+.result-entry-info { flex: 1 1 100%; min-width: 0; }
 
 .result-entry-name {
   font-weight: 600;
@@ -1051,9 +1055,16 @@ button:focus-visible, input:focus-visible, .chip:focus-visible {
   color: var(--text-muted);
   margin-top: 2px;
   font-variant-numeric: tabular-nums;
+  /* Wraps rather than truncates: it carries the gram weight, the source label
+     and the "portion guessed" flag, all of which the Adjust decision needs. */
+  line-height: 1.5;
 }
 
 .result-entry .link-btn { flex-shrink: 0; margin: 0; }
+
+/* Entries start BELOW the photo. Floated, the polaroid took 132px out of every
+   row beside it, which is where the squeeze came from. */
+#result-entries { clear: both; }
 
 .result-followup {
   display: flex;

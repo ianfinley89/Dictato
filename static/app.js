@@ -277,6 +277,9 @@ let _servingMode = false;   // true when the food has a known serving size
 // input leads. Logging always sends grams (kept in sync from servings).
 function openConfirm(food, defaultGrams = 100, source = 'manual', defaultServings = null, summary = '', photoUrl = '') {
   _confirmSource = source;
+  // Correcting an entry that already exists is an update, not a new log. Saying
+  // "Log it" made it read as though it would add a second copy.
+  $('confirm-log-btn').textContent = _adjustingEntryId ? 'Update' : 'Log it';
   setPolaroid($('confirm-photo'), photoUrl);
   setAiSummary($('confirm-ai-summary'), summary);
   $('confirm-picker').classList.add('hidden');   // reset any open picker
@@ -355,7 +358,9 @@ $('confirm-log-btn').addEventListener('click', async () => {
   if (!qty || qty <= 0) { showToast('Enter a quantity.', 'error'); return; }
   const foodName = state.pendingFood.name;
   const adjusting = _adjustingEntryId;
+  const backToCard = _adjustFromCard;
   _adjustingEntryId = null;
+  _adjustFromCard = false;
   try {
     if (adjusting) {
       // Same food, new amount: edit in place so the entry id — and therefore the
@@ -367,19 +372,37 @@ $('confirm-log-btn').addEventListener('click', async () => {
         state.pendingFood = null;
         showToast(`Updated ${foodName}`, 'success');
         await goToToday();
+        await returnToResultCard(backToCard);
         return;
       }
       await api.del(`/api/log/${adjusting}`);   // they swapped the food itself
     }
-    await api.post('/api/log/', { food_id: state.pendingFood.id, quantity_g: qty, source: _confirmSource });
+    const created = await api.post('/api/log/',
+      { food_id: state.pendingFood.id, quantity_g: qty, source: _confirmSource });
+    // A swap replaces the row, so the card's list has to follow the new id or
+    // the corrected item would simply vanish from it.
+    if (backToCard && adjusting && created && created.id && _lastResult) {
+      _lastResult.entries = (_lastResult.entries || [])
+        .map(e => (e.id === adjusting ? { ...e, id: created.id } : e));
+    }
     confirmOverlay.classList.add('hidden');
     state.pendingFood = null;
-    showToast(`Logged ${foodName}!`, 'success');
+    showToast(adjusting ? `Updated ${foodName}` : `Logged ${foodName}!`, 'success');
     await goToToday();   // new entries land on today — show it
+    await returnToResultCard(backToCard);
   } catch (err) {
     showToast(err.message, 'error');
   }
 });
+
+// Adjusting an item off a result card should hand you back the card — the photo,
+// the rest of the list, and the chance to fix the next item — instead of
+// dropping you in the day view with the capture gone.
+async function returnToResultCard(active) {
+  if (!active || !_lastResult) return;
+  await refreshResultEntries();
+  $('result-card').classList.remove('hidden');
+}
 
 // Is the entry still on the same food the user is confirming?
 async function entryHasFood(entryId, foodId) {
@@ -392,10 +415,13 @@ function _trimNum(x) {
   return Math.round(x * 100) / 100;
 }
 
-$('confirm-cancel-btn').addEventListener('click', () => {
+$('confirm-cancel-btn').addEventListener('click', async () => {
   _adjustingEntryId = null;      // cancelling an adjust leaves the entry as it was
+  const backToCard = _adjustFromCard;
+  _adjustFromCard = false;
   confirmOverlay.classList.add('hidden');
   state.pendingFood = null;
+  await returnToResultCard(backToCard);   // backing out returns you where you were
 });
 
 // "Wrong match?" — pick a different food, keeping the current quantity.
@@ -432,6 +458,7 @@ function showResultCard(result, photoUrl = '') {
   $('result-followup').classList.toggle('hidden', !result.capture_id);
   $('result-card').classList.remove('hidden');
   confirmOverlay.classList.add('hidden');
+  resetAdjustState();      // a new capture supersedes any half-finished adjust
 }
 
 $('followup-voice').addEventListener('click', () => {
@@ -862,11 +889,22 @@ function entryHtml(e) {
 // value they actually wanted was never linked to the capture. Keep the entry and
 // edit it in place; only fall back to delete+create if they swap the food.
 let _adjustingEntryId = null;
+let _adjustFromCard = false;   // the adjust was launched off a result card
+
+// Leaving the flow half-finished (new capture, pane change) must not leave the
+// next confirm thinking it is an update, or trying to reopen a card that is gone.
+function resetAdjustState() {
+  _adjustingEntryId = null;
+  _adjustFromCard = false;
+}
 
 async function adjustEntry(entryId, foodId, qty) {
   try {
     const food = await api.get(`/api/foods/${foodId}`);
     _adjustingEntryId = parseInt(entryId, 10);
+    // Came from a result card, so send them back to it afterwards rather than
+    // leaving them in the day view hunting for the capture they were fixing.
+    _adjustFromCard = !$('result-card').classList.contains('hidden');
     $('result-card').classList.add('hidden');
     openConfirm(food, parseFloat(qty) || 100, 'manual');
   } catch (err) { showToast(err.message, 'error'); }
@@ -1322,6 +1360,7 @@ async function showPane(name) {
     b.classList.toggle('active', b.dataset.pane === name));
   $('result-card').classList.add('hidden');
   confirmOverlay.classList.add('hidden');
+  resetAdjustState();
 
   if (name === 'home') {
     await goToToday();
