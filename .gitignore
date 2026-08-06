@@ -40,7 +40,12 @@ BUILD_PLAN.md
 CLAUDE.md
 
 # ── Editor / IDE / agent config (machine-specific) ──
-.claude/
+# Ignore .claude CONTENTS (settings.json holds machine-specific permissions) but
+# track the skills: they are shared project procedure, not local config. A bare
+# `.claude/` would exclude the directory itself and no `!` rule could reach back
+# inside it.
+.claude/*
+!.claude/skills/
 .vscode/
 .idea/
 *.swp
