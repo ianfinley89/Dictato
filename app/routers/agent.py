@@ -234,7 +234,8 @@ async def agent_log(
                 "entries": entries, "annotation": result.get("annotation") or {},
                 "fast_path": False, "revised": True,
                 "confidence": needs_clarification(entries, result["summary"],
-                                                  CLARIFY_THRESHOLD)}
+                                                  CLARIFY_THRESHOLD,
+                                                  result.get("corrections"))}
 
     summary = result["summary"]
     if weighed:

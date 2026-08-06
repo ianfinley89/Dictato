@@ -1183,3 +1183,69 @@ def test_web_search_failure_does_not_kill_the_capture(client, monkeypatch):
     out = asyncio.run(ag._execute_tool("web_search", {"query": "x"}, uid,
                                        "voice", None, [], {}, web_uses=[]))
     assert "unavailable" in out["error"]
+
+
+# ── A follow-up that changes nothing must SAY so ─────────────────────────────
+def _noop_followup(client, monkeypatch, model_says):
+    from app.routers import agent as agent_router
+    monkeypatch.setattr(agent_router, "ANTHROPIC_API_KEY", "test-key")
+    uid = _register(client)
+    _seed_food(name="chickpea curry", serving_g=None)
+    _log_once(uid, 1)
+    r1 = client.post("/api/agent/log", data={"text": "I had chickpea curry"})
+    cap_id = r1.json()["capture_id"]
+    # The real failure: the model touched nothing and then described a change.
+    _script_llm(monkeypatch, [_text(model_says)])
+    r2 = client.post("/api/agent/log",
+                     data={"text": "it's made with tomatoes instead of coconut milk",
+                           "revise_capture_id": str(cap_id)})
+    assert r2.status_code == 200
+    return r2.json()
+
+
+def test_a_revision_that_changed_nothing_cannot_claim_it_did(client, monkeypatch):
+    """A user was told "Logged chickpea curry with tomatoes, garlic, onion and
+    olive oil" after the model called no mutating tool at all. The sentence is
+    replaced, not appended to, because the claim itself was the damage."""
+    d = _noop_followup(client, monkeypatch,
+                       "Logged chickpea curry with tomatoes, garlic, onion and olive oil.")
+    assert "didn't change anything" in d["summary"]
+    assert "tomatoes" not in d["summary"]
+    assert "chickpea curry" in d["summary"].lower()
+
+
+def test_a_no_op_revision_is_recorded_as_a_correction_that_did_not_land(client, monkeypatch):
+    """Otherwise it is invisible: entries exist and look grounded, so every other
+    signal reads it as a clean capture."""
+    d = _noop_followup(client, monkeypatch, "Everything checks out.")
+    tags = (d.get("annotation") or {}).get("tags") or []
+    assert "correction:none-applied" in tags
+
+
+def test_a_no_op_revision_flags_for_clarification(client, monkeypatch):
+    """The user took the trouble to correct something and it did not land — that
+    is a failed capture however grounded the entries look."""
+    d = _noop_followup(client, monkeypatch, "Everything checks out.")
+    assert d["confidence"]["clarify"] is True
+    assert d["confidence"]["reason"] == "correction-not-applied"
+
+
+def test_a_revision_that_DID_change_something_is_untouched(client, monkeypatch):
+    """The honesty layer must not fire on real corrections."""
+    from app.routers import agent as agent_router
+    monkeypatch.setattr(agent_router, "ANTHROPIC_API_KEY", "test-key")
+    uid = _register(client)
+    _seed_food(name="chickpea curry", serving_g=None)
+    _log_once(uid, 1)
+    r1 = client.post("/api/agent/log", data={"text": "I had chickpea curry"})
+    cap_id, entry_id = r1.json()["capture_id"], r1.json()["entries"][0]["id"]
+    _script_llm(monkeypatch, [
+        _tool("update_entry", {"entry_id": entry_id, "quantity_g": 300}, "t1"),
+        _text("Bumped it to 300g."),
+    ])
+    d = client.post("/api/agent/log",
+                    data={"text": "it was a bigger bowl", "revise_capture_id": str(cap_id)}).json()
+    assert d["summary"] == "Bumped it to 300g."
+    tags = (d.get("annotation") or {}).get("tags") or []
+    assert "correction:none-applied" not in tags
+    assert "correction:portion" in tags

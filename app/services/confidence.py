@@ -85,8 +85,17 @@ def score_capture(entries: list[dict], summary: str = "") -> dict:
     return {"score": round(score, 3), "reason": reason, "asked_question": False}
 
 
-def needs_clarification(entries: list[dict], summary: str, threshold: float) -> dict:
-    """Score plus the decision, so the caller doesn't re-implement the comparison."""
+def needs_clarification(entries: list[dict], summary: str, threshold: float,
+                        corrections: list | None = None) -> dict:
+    """Score plus the decision, so the caller doesn't re-implement the comparison.
+
+    A follow-up that changed NOTHING is a failed capture even though entries
+    exist and look grounded: the user took the trouble to correct something and
+    the correction did not land. Nothing else in the score can see that — every
+    other input describes the entries, which are exactly as they were."""
+    if corrections and "correction:none-applied" in corrections:
+        return {"score": _FAILED, "reason": "correction-not-applied",
+                "asked_question": False, "threshold": threshold, "clarify": True}
     s = score_capture(entries, summary)
     s["threshold"] = threshold
     s["clarify"] = s["score"] < threshold

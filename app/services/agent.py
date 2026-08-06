@@ -28,6 +28,7 @@ from app.services.portion import (resolve_grams, guard_grams, snap_estimate,
 from app.services.portion_history import personal_prior
 from app.services.plausibility import check_nutrition
 from app.services.profile import apply_profile_update
+from app.services.recipe_candidate import tag_for as recipe_candidate_tag
 from app.services.voice_parse import parse_local
 
 MAX_TURNS = 8
@@ -182,6 +183,15 @@ remove_entry to drop wrong items, and the normal search/log tools ONLY for items
 logged yet — never re-log an existing item. If the label or tags improved, call \
 annotate_capture again. Finish with one short sentence about what changed (or that \
 it was confirmed) — no questions, no lists.
+
+DIFFERENT INGREDIENTS ARE NOT A MATCH. If they describe what the dish is made of \
+and it differs from the food you grounded it in ("made with tomatoes instead of \
+coconut milk", "no cheese", "cooked in butter"), that is evidence the grounding is \
+wrong, not confirmation that it is right. Search for a closer food and update it. \
+NEVER argue the difference doesn't affect the nutrition — you cannot know that, the \
+database decides it, and swapping coconut milk for tomatoes plainly does. If no \
+closer food exists, say exactly that: name the row still in use and why it is the \
+nearest, so they can judge it themselves.
 
 Already logged:
 {entries}
@@ -746,6 +756,20 @@ async def run_agent(user_id: int, *, text: str | None = None,
             summary = f"Logged {len(logged)} item{'s' if len(logged) != 1 else ''}."
         else:
             summary = "I couldn't identify anything to log — try rephrasing or log it manually."
+    # A revision that called no mutating tool changed NOTHING, whatever the model
+    # then wrote. One told a user "Logged chickpea curry with tomatoes, garlic,
+    # onion and olive oil" after touching nothing — and separately argued that
+    # swapping coconut milk for tomatoes "doesn't change the nutrition", which is
+    # both false and not its call to make. The sentence is replaced rather than
+    # appended to, because the claim itself was the damage.
+    if revision is not None and not corrections:
+        corrections.append("correction:none-applied")
+        names = [e.get("food_name") for e in (revision.get("entries") or [])
+                 if e.get("food_name")]
+        still = ", ".join(names[:3]) if names else "what you already logged"
+        summary = (f"I didn't change anything — still logged as {still}. "
+                   f"If that's not right, tap Adjust or Portion on the entry.")
+
     if logged and not annotation.get("meal"):
         annotation.setdefault("meal", local_hour_meal(tz_offset))
     # Typed correction labels ride on the capture's tags, so they reach the admin
@@ -755,6 +779,12 @@ async def run_agent(user_id: int, *, text: str | None = None,
     if corrections:
         tags = list(annotation.get("tags") or [])
         annotation["tags"] = tags + [c for c in corrections if c not in tags]
+    # Mark captures a recipe would have served better. Costs no tokens, and it is
+    # how the recipe path gets test cases before anything is built for it.
+    extra = recipe_candidate_tag(text or "", logged, corrections)
+    if extra:
+        tags = list(annotation.get("tags") or [])
+        annotation["tags"] = tags + [t for t in extra if t not in tags]
     return {"summary": summary, "entries": logged, "annotation": annotation,
             "turns": turn + 1, "error": error, "corrections": corrections}
 
