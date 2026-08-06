@@ -83,8 +83,10 @@ the fact.
 
 - Menu-Match calorie error: **±5 points**. Restaurant portions genuinely vary,
   and a generic lookup legitimately differs from one restaurant's serving.
-- `eval_search_ranking`: **17–19/20 is one number**, not a trend. It hits the
-  live USDA API, whose results shift between runs.
+- `eval_search_ranking`: **16–19/20 is one number**, not a trend. It hits the
+  live USDA API, whose results shift between runs — the same code scored 16 and
+  18 minutes apart. Confirm any single-item change by calling `search_foods`
+  directly for that query before believing the scoreboard.
 - Any count over n=41 dishes: a change of one or two items is not a result.
 
 Read Menu-Match in its own priority order: **rule-#1 suspects** (grounded in

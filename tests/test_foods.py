@@ -677,3 +677,28 @@ def test_names_still_work_when_a_payload_has_no_ids():
         {"nutrientName": "Protein", "unitName": "G", "value": 3.0},
     ])
     assert n["calories"] == 88.0 and n["protein_g"] == 3.0
+
+
+def test_covers_handles_es_plurals():
+    """"potatoes"[:-1] is "potatoe", which matches nothing — so "mashed
+    potatoes" scored 1 hit against "Potato, mashed, NFS" and 2 against a branded
+    "MASHED POTATOES", and the generic row lost before any tiebreak."""
+    from app.services.food_lookup import _covers
+    assert _covers("potato, mashed, nfs", "potatoes")
+    assert _covers("tomato, red, ripe, raw", "tomatoes")
+    assert _covers("sandwich, egg", "sandwiches")
+    # the plain -s case must still work
+    assert _covers("egg, whole, cooked, scrambled", "eggs")
+    # and a genuine miss stays a miss
+    assert not _covers("potato, mashed, nfs", "carrots")
+
+
+def test_generic_row_now_outranks_the_branded_dry_mix():
+    from app.services.food_lookup import _rank_by_relevance
+    out = _rank_by_relevance([
+        {"name": "MASHED POTATOES", "brand": "Tops Markets, LLC",
+         "nutrients_per_100g": {"calories": 429.0}},
+        {"name": "Potato, mashed, NFS", "brand": None,
+         "nutrients_per_100g": {"calories": 113.0}},
+    ], "mashed potatoes")
+    assert out[0]["name"] == "Potato, mashed, NFS"

@@ -238,7 +238,19 @@ def _query_tokens(q: str) -> list[str]:
 
 
 def _covers(hay: str, token: str) -> bool:
-    return token in hay or (token.endswith("s") and token[:-1] in hay)
+    """Does this query word appear in the text, allowing for an English plural?
+
+    Stripping only a trailing "s" turns "potatoes" into "potatoe", which matches
+    nothing — so "mashed potatoes" scored ONE hit against "Potato, mashed, NFS"
+    and two against a branded "MASHED POTATOES", and the generic row lost on hits
+    before any tiebreak could reach it. `-es` plurals need both letters off:
+    potatoes/tomatoes → potato/tomato, boxes → box, dishes → dish.
+    `_noun_match` already knew this; this did not."""
+    if token in hay:
+        return True
+    if token.endswith("es") and token[:-2] in hay:
+        return True
+    return token.endswith("s") and token[:-1] in hay
 
 
 def _brand_names_token(brand: str, token: str) -> bool:
